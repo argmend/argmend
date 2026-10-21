@@ -62,6 +62,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = replace_python_literals(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("replaced Python literals"));
+        text = cleaned;
+    }
+
     let cleaned = remove_trailing_commas(&text);
     if cleaned != text {
         repairs.push(syntax_note("removed trailing commas"));
@@ -138,19 +144,26 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                 i += 1;
                 while i < len && chars[i] != '\'' {
                     if chars[i] == '\\' {
-                        out.push(chars[i]);
                         i += 1;
                         if i < len {
-                            out.push(chars[i]);
+                            // `\'` is an apostrophe. Copied through, it is
+                            // not a legal JSON escape, so the repair failed.
+                            if chars[i] == '\'' {
+                                out.push('\'');
+                            } else {
+                                out.push('\\');
+                                out.push(chars[i]);
+                            }
                             i += 1;
                         }
                     } else {
-                        // Escape embedded double quotes inside the
-                        // converted string.
-                        if chars[i] == '"' {
-                            out.push('\\');
+                        match chars[i] {
+                            '"' => out.push_str("\\\""),
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
+                            other => out.push(other),
                         }
-                        out.push(chars[i]);
                         i += 1;
                     }
                 }
@@ -271,6 +284,77 @@ pub(crate) fn fix_triple_quotes(s: &str) -> String {
         }
     }
     out.push_str(rest);
+    out
+}
+
+/// Replace bare Python `True` / `False` / `None` values with JSON.
+///
+/// A following `:` means the word is a key, so it is left alone.
+pub(crate) fn replace_python_literals(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        match chars[i] {
+            '"' => {
+                out.push('"');
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' {
+                        out.push(chars[i]);
+                        i += 1;
+                        if i < len {
+                            out.push(chars[i]);
+                            i += 1;
+                        }
+                    } else {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    out.push('"');
+                    i += 1;
+                }
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                let start = i;
+                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let ident: String = chars[start..i].iter().collect();
+                let mut j = i;
+                while j < len && chars[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let is_key = j < len && chars[j] == ':';
+                if !is_key {
+                    match ident.as_str() {
+                        "True" => {
+                            out.push_str("true");
+                            continue;
+                        }
+                        "False" => {
+                            out.push_str("false");
+                            continue;
+                        }
+                        "None" => {
+                            out.push_str("null");
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                out.push_str(&ident);
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
     out
 }
 

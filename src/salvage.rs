@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::RepairError;
+use crate::{RepairError, RepairOutcome, Rewrite};
 
 pub(crate) fn unwrap_fence(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -24,7 +24,8 @@ pub(crate) fn unwrap_fence(raw: &str) -> Option<String> {
 ///
 /// An open string is left alone. Closing it would invent the end of a path
 /// or a key. A trailing `:` or `,` is also left alone, because the value is
-/// missing.
+/// missing. A `{` or `[` that has not started a value is left alone too.
+/// Closing it would invent an empty container.
 pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
@@ -65,7 +66,7 @@ pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     if in_string || stack.is_empty() {
         return None;
     }
-    if matches!(last_sig, Some(':') | Some(',')) {
+    if last_sig.is_none() || matches!(last_sig, Some(':') | Some(',')) {
         return None;
     }
     let mut out = trimmed.to_string();
@@ -75,12 +76,13 @@ pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     Some(out)
 }
 
-pub(crate) fn xml_parameters(raw: &str) -> Result<Option<Value>, RepairError> {
+pub(crate) fn xml_parameters(raw: &str) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("<parameter") {
         return Ok(None);
     }
     let mut object = serde_json::Map::new();
+    let mut rewrites = Vec::new();
     let mut rest = trimmed;
     let mut found = false;
     while let Some(start) = rest.find("<parameter") {
@@ -103,7 +105,9 @@ pub(crate) fn xml_parameters(raw: &str) -> Result<Option<Value>, RepairError> {
                 "xml parameter '{name}' is repeated"
             )));
         }
-        object.insert(name, parameter_value(content));
+        let (value, more) = parameter_value(content)?;
+        rewrites.extend(more);
+        object.insert(name, value);
         rest = &after_name[content_end + "</parameter>".len()..];
     }
     if !rest.trim().is_empty() {
@@ -116,7 +120,7 @@ pub(crate) fn xml_parameters(raw: &str) -> Result<Option<Value>, RepairError> {
             "xml parameter tag could not be read".into(),
         ));
     }
-    Ok(Some(Value::Object(object)))
+    Ok(Some((Value::Object(object), rewrites)))
 }
 
 fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
@@ -155,13 +159,18 @@ fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
     Ok((name.to_string(), &after_name[gt + 1..]))
 }
 
-fn parameter_value(content: &str) -> Value {
-    if looks_like_json_container(content)
-        && let Ok(value) = serde_json::from_str::<Value>(content)
-    {
-        return value;
+fn parameter_value(content: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if !looks_like_json_container(content) {
+        return Ok((Value::String(content.to_string()), Vec::new()));
     }
-    Value::String(content.to_string())
+    // A container that is not JSON must not become a string. That would
+    // hand the host a different type. Repair it, or refuse.
+    match crate::repair_json(content) {
+        RepairOutcome::Valid(value) => Ok((value, Vec::new())),
+        RepairOutcome::Repaired { value, repairs } => Ok((value, repairs)),
+        RepairOutcome::Unfixable(reason) => Err(RepairError::Unfixable(reason)),
+        RepairOutcome::Ambiguous(reason) => Err(RepairError::Ambiguous(reason)),
+    }
 }
 
 fn looks_like_json_container(content: &str) -> bool {

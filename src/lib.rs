@@ -123,7 +123,8 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
     }
 
     match salvage::xml_parameters(&body)? {
-        Some(value) => {
+        Some((value, more)) => {
+            prefix.extend(more);
             prefix.push(note(RewriteKind::XmlParameters, "read xml parameters"));
             Ok((value, prefix))
         }
@@ -466,6 +467,91 @@ mod tests {
         assert!(matches!(
             repair_json(r#"{"a": 1} /*"#),
             RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn bare_opener_is_not_an_empty_container() {
+        assert!(matches!(repair_json("{"), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("["), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("[{"), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("[1,"), RepairOutcome::Unfixable(_)));
+    }
+
+    #[test]
+    fn complete_array_still_closes() {
+        match repair_json("[1, 2") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, json!([1, 2]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xml_truncated_container_is_unfixable() {
+        let raw = r#"<parameter name="meta">{</parameter>"#;
+        assert!(matches!(repair_json(raw), RepairOutcome::Unfixable(_)));
+    }
+
+    #[test]
+    fn xml_json_container_is_repaired_not_stringified() {
+        let raw = r#"<parameter name="meta">{ "ok": true, }</parameter><parameter name="file">a.rs</parameter>"#;
+        match repair_json(raw) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["meta"]["ok"], true);
+                assert_eq!(value["file"], "a.rs");
+                assert!(
+                    repairs.iter().any(|item| item.kind == RewriteKind::Syntax),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::XmlParameters)
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_quoted_apostrophe_and_newline() {
+        match repair_json(r"{'a': 'it\'s // fine'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "it's // fine");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{'msg': 'line1\nline2'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["msg"], "line1\nline2");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn python_literals_become_json_values() {
+        match repair_json("{a: True, b: False, c: None, items: [True, None]}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], true);
+                assert_eq!(value["b"], false);
+                assert_eq!(value["c"], json!(null));
+                assert_eq!(value["items"][0], true);
+                assert_eq!(value["items"][1], json!(null));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{True: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["True"], 1);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json(r#"{"a": "True"}"#),
+            RepairOutcome::Valid(_)
         ));
     }
 
