@@ -405,6 +405,17 @@ mod tests {
     }
 
     #[test]
+    fn only_unknown_key_is_not_dropped() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"file": {"type": "string"}}
+        });
+        let err = normalize(&json!({"note": "x"}), &schema).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn one_unknown_key_is_dropped_when_required_is_present() {
         let schema = json!({
             "type": "object",

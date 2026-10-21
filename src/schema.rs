@@ -97,11 +97,16 @@ fn normalize_object(
             )));
         }
         if let Some((key, val)) = unknown.pop() {
-            if required_present(schema, &out) {
+            let ready = required_present(schema, &out);
+            if ready && !out.is_empty() {
                 rewrites.push(rewrite(
                     RewriteKind::DroppedUnknown,
                     format!("dropped unknown key {key}"),
                 ));
+            } else if ready {
+                return Err(RepairError::Ambiguous(format!(
+                    "refusing to drop the only key '{key}'"
+                )));
             } else {
                 out.insert(key, val);
             }
