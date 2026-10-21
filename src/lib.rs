@@ -436,4 +436,14 @@ mod tests {
         ));
         assert!(matches!(repair_json(""), RepairOutcome::Unfixable(_)));
     }
+
+    #[test]
+    fn single_quoted_url_is_not_cut_at_the_slashes() {
+        match repair_json("{'url': 'http://example.com/a'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["url"], "http://example.com/a");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
 }

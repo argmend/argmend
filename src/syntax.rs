@@ -330,6 +330,10 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 }
 
 /// Strip `//` line comments and `/* ... */` block comments.
+///
+/// Single-quoted strings are skipped, same as double-quoted strings.
+/// Quote repair runs after this stage, so `//` inside `'http://example.com'`
+/// is part of the value.
 pub(crate) fn strip_json_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -338,11 +342,11 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
 
     while i < len {
         match chars[i] {
-            // Skip over strings.
-            '"' => {
-                out.push('"');
+            '"' | '\'' => {
+                let quote = chars[i];
+                out.push(quote);
                 i += 1;
-                while i < len && chars[i] != '"' {
+                while i < len && chars[i] != quote {
                     if chars[i] == '\\' {
                         out.push(chars[i]);
                         i += 1;
@@ -356,7 +360,7 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                     }
                 }
                 if i < len {
-                    out.push('"');
+                    out.push(quote);
                     i += 1;
                 }
             }
@@ -603,6 +607,24 @@ mod tests {
         let input = r#"{"url": "https://x.com"}"#;
         let out = strip_json_comments(input);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn strip_json_comments_inside_single_quoted_string() {
+        let input = "{'url': 'http://example.com/a', 'note': 'keep /* this */'}";
+        assert_eq!(strip_json_comments(input), input);
+    }
+
+    #[test]
+    fn single_quoted_url_keeps_the_path_and_drops_the_trailing_comment() {
+        let input = "{'url': 'http://example.com/a', 'note': 'keep /* this */'} // tail";
+        match repair_tool_call_json(input) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["url"], "http://example.com/a");
+                assert_eq!(value["note"], "keep /* this */");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
     }
 
     #[test]
