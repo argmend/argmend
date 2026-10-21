@@ -96,7 +96,7 @@ fn normalize_object(
                 unknown.len()
             )));
         }
-        if let Some((key, val)) = unknown.pop() {
+        if let Some((key, _)) = unknown.pop() {
             let ready = required_present(schema, &out);
             if ready && !out.is_empty() {
                 rewrites.push(rewrite(
@@ -108,7 +108,9 @@ fn normalize_object(
                     "refusing to drop the only key '{key}'"
                 )));
             } else {
-                out.insert(key, val);
+                return Err(RepairError::Ambiguous(format!(
+                    "unknown key '{key}' and a required field is missing"
+                )));
             }
         }
     } else {
