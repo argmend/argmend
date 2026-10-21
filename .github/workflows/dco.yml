@@ -1,0 +1,57 @@
+name: DCO
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: dco-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check DCO sign-off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+        run: |
+          for sha in $(git rev-list "${BASE_SHA}"..HEAD); do
+            parents=$(git log -1 --format='%P' "$sha")
+            if [[ "$parents" == *" "* ]]; then
+              continue
+            fi
+            author=$(git log -1 --format='%an' "$sha")
+            if [[ "$author" == *"[bot]" ]]; then
+              echo "Skipping bot commit $sha by $author"
+              continue
+            fi
+            body=$(git log -1 --format='%B' "$sha")
+            if ! printf '%s\n' "$body" | grep -qi '^Signed-off-by:'; then
+              echo "::error::Commit $sha by $author is missing Signed-off-by"
+              exit 1
+            fi
+            if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*Co-authored-by:.*anthropic\.com'; then
+              echo "::error::Commit $sha by $author credits an Anthropic co-author. Remove the Co-authored-by trailer."
+              exit 1
+            fi
+            if printf '%s\n' "$body" | grep -qiE '^[[:space:]]*Claude-Session:'; then
+              echo "::error::Commit $sha by $author contains a Claude-Session trailer. Remove it."
+              exit 1
+            fi
+          done
+          echo "All commits have DCO sign-off"
