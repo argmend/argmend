@@ -238,7 +238,75 @@ fn number_string(text: &str) -> Option<serde_json::Number> {
     if !parsed.is_finite() {
         return None;
     }
-    serde_json::Number::from_f64(parsed)
+    let number = serde_json::Number::from_f64(parsed)?;
+    // f64 turns 9007199254740993.5 into 9007199254740994.0. Keep the
+    // original string unless the JSON number is the same value.
+    if !same_decimal(text, &number.to_string()) {
+        return None;
+    }
+    Some(number)
+}
+
+/// `coef * 10^exp10`, with factors of ten folded into `exp10`.
+#[derive(PartialEq, Eq)]
+struct Decimal {
+    neg: bool,
+    coef: u128,
+    exp10: i32,
+}
+
+fn same_decimal(left: &str, right: &str) -> bool {
+    match (parse_decimal(left), parse_decimal(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn parse_decimal(text: &str) -> Option<Decimal> {
+    let neg = text.starts_with('-');
+    let text = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (mantissa, exp_text) = text
+        .split_once(['e', 'E'])
+        .map_or((text, None), |(mantissa, exp)| (mantissa, Some(exp)));
+    let exp: i32 = match exp_text {
+        Some(exp) => exp.parse().ok()?,
+        None => 0,
+    };
+    let (whole, frac) = mantissa
+        .split_once('.')
+        .map_or((mantissa, ""), |(whole, frac)| (whole, frac));
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let frac = frac.trim_end_matches('0');
+    let mut digits = String::new();
+    digits.push_str(whole.trim_start_matches('0'));
+    digits.push_str(frac);
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some(Decimal {
+            neg: false,
+            coef: 0,
+            exp10: 0,
+        });
+    }
+    if digits.len() > 38 {
+        return None;
+    }
+    let mut coef: u128 = digits.parse().ok()?;
+    let mut exp10 = exp.checked_sub(i32::try_from(frac.len()).ok()?)?;
+    while coef.is_multiple_of(10) {
+        coef /= 10;
+        exp10 = exp10.checked_add(1)?;
+    }
+    Some(Decimal {
+        neg: neg && coef != 0,
+        coef,
+        exp10,
+    })
 }
 
 fn is_integer_token(text: &str) -> bool {

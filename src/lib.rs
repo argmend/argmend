@@ -438,6 +438,38 @@ mod tests {
     }
 
     #[test]
+    fn inexact_decimal_string_stays_a_string() {
+        let schema = json!({"type": "object", "properties": {"n": {"type": "number"}}});
+        let repaired = normalize(&json!({"n": "9007199254740993.5"}), &schema).expect("keep");
+        assert_eq!(repaired.value["n"], "9007199254740993.5");
+        assert!(repaired.rewrites.is_empty(), "{:?}", repaired.rewrites);
+    }
+
+    #[test]
+    fn exact_decimal_string_is_still_coerced() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tenth": {"type": "number"},
+                "half": {"type": "number"}
+            }
+        });
+        let repaired = normalize(&json!({"tenth": "0.1", "half": "1.5"}), &schema).expect("coerce");
+        assert_eq!(repaired.value["tenth"], json!(0.1));
+        assert_eq!(repaired.value["half"], json!(1.5));
+    }
+
+    #[test]
+    fn unclosed_block_comment_does_not_drop_later_keys() {
+        let raw = r#"{"file": "a.rs" /* , "cmd": "rm" }"#;
+        assert!(matches!(repair_json(raw), RepairOutcome::Unfixable(_)));
+        assert!(matches!(
+            repair_json(r#"{"a": 1} /*"#),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn single_quoted_url_is_not_cut_at_the_slashes() {
         match repair_json("{'url': 'http://example.com/a'}") {
             RepairOutcome::Repaired { value, .. } => {

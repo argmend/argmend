@@ -372,13 +372,25 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                         i += 1;
                     }
                 } else if chars[i + 1] == '*' {
-                    // Block comment: skip until "*/".
+                    // A closed block comment is removed. An unclosed one is
+                    // kept: dropping the tail and then inventing `}` would
+                    // change the object.
+                    let start = i;
                     i += 2;
-                    while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    let mut closed = false;
+                    while i + 1 < len {
+                        if chars[i] == '*' && chars[i + 1] == '/' {
+                            i += 2;
+                            closed = true;
+                            break;
+                        }
                         i += 1;
                     }
-                    if i + 1 < len {
-                        i += 2; // skip "*/"
+                    if !closed {
+                        for ch in &chars[start..] {
+                            out.push(*ch);
+                        }
+                        break;
                     }
                 } else {
                     out.push(chars[i]);
@@ -607,6 +619,12 @@ mod tests {
         let input = r#"{"url": "https://x.com"}"#;
         let out = strip_json_comments(input);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn unclosed_block_comment_is_left_in_place() {
+        let input = r#"{"file": "a.rs" /* , "cmd": "rm" }"#;
+        assert_eq!(strip_json_comments(input), input);
     }
 
     #[test]
