@@ -891,6 +891,20 @@ mod tests {
     }
 
     #[test]
+    fn hyphenated_bare_key_is_quoted() {
+        match repair_json(r#"{file-path: "a.rs"}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["file-path"], "a.rs");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{n: 1-2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn dollar_ref_key_is_quoted() {
         match repair_json(r##"{$ref: "#/defs/a", file: "a.rs"}"##) {
             RepairOutcome::Repaired { value, .. } => {
