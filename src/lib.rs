@@ -1337,6 +1337,37 @@ mod tests {
     }
 
     #[test]
+    fn const_object_coerces_when_one_member_matches() {
+        let schema = json!({"enum": [{"a": 1}, {"a": 2}]});
+        let repaired = normalize(&json!({"a": "1"}), &schema).expect("one");
+        assert_eq!(repaired.value, json!({"a": 1}));
+        let kept = normalize(&json!({"a": "3"}), &schema).expect("none");
+        assert_eq!(kept.value["a"], "3");
+        assert!(kept.rewrites.is_empty());
+
+        let both = json!({"enum": [{"a": 1}, {"a": "1"}]});
+        let kept = normalize(&json!({"a": "1"}), &both).expect("both");
+        assert_eq!(kept.value["a"], "1");
+        assert!(kept.rewrites.is_empty());
+
+        let row = json!({"const": [1, true]});
+        let repaired = normalize(&json!(["1", "true"]), &row).expect("row");
+        assert_eq!(repaired.value, json!([1, true]));
+
+        let already = normalize(&json!({"a": 1}), &schema).expect("already");
+        assert_eq!(already.value, json!({"a": 1}));
+        assert!(already.rewrites.is_empty());
+
+        let typed = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "enum": [{"a": 1}, {"a": 2}]
+        });
+        let err = normalize(&json!({"a": "3"}), &typed).expect_err("outside");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn contains_rejects_a_coercion_that_drops_the_match() {
         let dropped = json!({
             "type": "array",
