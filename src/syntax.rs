@@ -102,6 +102,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = normalize_unicode_space(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("replaced unicode whitespace"));
+        text = cleaned;
+    }
+
     let cleaned = replace_key_equals(&text);
     if cleaned != text {
         repairs.push(syntax_note("replaced key equals"));
@@ -1049,6 +1055,52 @@ pub(crate) fn escape_controls_in_strings(s: &str) -> String {
                 '\t' => out.push_str("\\t"),
                 other => out.push(other),
             }
+            index += 1;
+        }
+        if index < len {
+            out.push('"');
+            index += 1;
+        }
+    }
+    out
+}
+
+/// Unicode whitespace outside a string becomes an ASCII space.
+/// A no-break space inside a string stays.
+pub(crate) fn normalize_unicode_space(s: &str) -> String {
+    if !s
+        .chars()
+        .any(|ch| ch.is_whitespace() && !ch.is_ascii_whitespace())
+    {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut index = 0;
+    while index < len {
+        if chars[index] != '"' {
+            if chars[index].is_whitespace() && !chars[index].is_ascii_whitespace() {
+                out.push(' ');
+            } else {
+                out.push(chars[index]);
+            }
+            index += 1;
+            continue;
+        }
+        out.push('"');
+        index += 1;
+        while index < len && chars[index] != '"' {
+            if chars[index] == '\\' {
+                out.push('\\');
+                index += 1;
+                if index < len {
+                    out.push(chars[index]);
+                    index += 1;
+                }
+                continue;
+            }
+            out.push(chars[index]);
             index += 1;
         }
         if index < len {
