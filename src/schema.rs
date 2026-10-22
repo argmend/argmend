@@ -19,10 +19,17 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let (next, rewrites) = normalize_known(value, schema)?;
-    if (next != *value || !rewrites.is_empty()) && violates_not(schema, &next) {
-        return Err(RepairError::Ambiguous(
-            "coerced value is excluded by not".into(),
-        ));
+    if next != *value || !rewrites.is_empty() {
+        if violates_not(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value is excluded by not".into(),
+            ));
+        }
+        if violates_bounds(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value is outside the schema bounds".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -251,6 +258,69 @@ fn violates_not(schema: &Value, value: &Value) -> bool {
         return false;
     };
     known_constraint(not_schema) && branch_accepts(not_schema, value)
+}
+
+/// Inclusive `minimum` / `maximum`, numeric exclusive bounds, and the
+/// draft-04 boolean form of `exclusiveMinimum` / `exclusiveMaximum`.
+/// A bound that is not an exact finite number is ignored.
+fn violates_bounds(schema: &Value, value: &Value) -> bool {
+    let Some(number) = finite_bound(value) else {
+        return false;
+    };
+    below_minimum(schema, number) || above_maximum(schema, number)
+}
+
+fn below_minimum(schema: &Value, number: f64) -> bool {
+    if let Some(limit) = schema.get("exclusiveMinimum").and_then(finite_bound)
+        && number <= limit
+    {
+        return true;
+    }
+    let Some(limit) = schema.get("minimum").and_then(finite_bound) else {
+        return false;
+    };
+    if matches!(schema.get("exclusiveMinimum"), Some(Value::Bool(true))) {
+        number <= limit
+    } else {
+        number < limit
+    }
+}
+
+fn above_maximum(schema: &Value, number: f64) -> bool {
+    if let Some(limit) = schema.get("exclusiveMaximum").and_then(finite_bound)
+        && number >= limit
+    {
+        return true;
+    }
+    let Some(limit) = schema.get("maximum").and_then(finite_bound) else {
+        return false;
+    };
+    if matches!(schema.get("exclusiveMaximum"), Some(Value::Bool(true))) {
+        number >= limit
+    } else {
+        number > limit
+    }
+}
+
+fn finite_bound(value: &Value) -> Option<f64> {
+    let number = value.as_f64()?;
+    if !number.is_finite() || !exact_json_number(value) {
+        return None;
+    }
+    Some(number)
+}
+
+fn exact_json_number(value: &Value) -> bool {
+    let Some(number) = value.as_f64() else {
+        return false;
+    };
+    if let Some(int) = value.as_i64() {
+        return int as f64 == number && number as i64 == int;
+    }
+    if let Some(int) = value.as_u64() {
+        return int as f64 == number && number as u64 == int;
+    }
+    true
 }
 
 fn known_constraint(schema: &Value) -> bool {
