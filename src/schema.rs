@@ -253,7 +253,8 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
 }
 
 fn integer_string(text: &str) -> Option<serde_json::Number> {
-    let text = text.strip_prefix('+').unwrap_or(text);
+    let text = without_digit_underscores(text)?;
+    let text = text.strip_prefix('+').unwrap_or(&text);
     if text.is_empty() || !is_integer_token(text) || has_leading_zero(text) {
         return None;
     }
@@ -262,7 +263,8 @@ fn integer_string(text: &str) -> Option<serde_json::Number> {
 }
 
 fn number_string(text: &str) -> Option<serde_json::Number> {
-    let text = text.strip_prefix('+').unwrap_or(text);
+    let text = without_digit_underscores(text)?;
+    let text = text.strip_prefix('+').unwrap_or(&text);
     if let Some(number) = integer_string(text) {
         return Some(number);
     }
@@ -354,6 +356,26 @@ fn is_scientific_token(text: &str) -> bool {
         return false;
     }
     is_integer_token(mantissa) || is_decimal_token(mantissa)
+}
+
+fn without_digit_underscores(text: &str) -> Option<String> {
+    if !text.contains('_') {
+        return Some(text.to_string());
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch == '_' {
+            let before_digit = index > 0 && chars[index - 1].is_ascii_digit();
+            let after_digit = chars.get(index + 1).is_some_and(char::is_ascii_digit);
+            if before_digit && after_digit {
+                continue;
+            }
+            return None;
+        }
+        out.push(ch);
+    }
+    Some(out)
 }
 
 fn has_leading_zero(text: &str) -> bool {
