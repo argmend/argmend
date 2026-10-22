@@ -76,6 +76,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = replace_hex_numbers(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("replaced hexadecimal numbers"));
+        text = cleaned;
+    }
+
     let cleaned = fix_triple_quotes(&text);
     if cleaned != text {
         repairs.push(syntax_note(
@@ -717,6 +723,76 @@ pub(crate) fn escape_controls_in_strings(s: &str) -> String {
     out
 }
 
+/// `0x10` outside a string becomes `16`. A value that does not fit in
+/// i64, or a trailing `.`, is left unchanged.
+pub(crate) fn replace_hex_numbers(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut index = 0;
+    while index < len {
+        if chars[index] == '"' {
+            out.push('"');
+            index += 1;
+            while index < len && chars[index] != '"' {
+                if chars[index] == '\\' {
+                    out.push('\\');
+                    index += 1;
+                    if index < len {
+                        out.push(chars[index]);
+                        index += 1;
+                    }
+                } else {
+                    out.push(chars[index]);
+                    index += 1;
+                }
+            }
+            if index < len {
+                out.push('"');
+                index += 1;
+            }
+            continue;
+        }
+        let boundary = index == 0 || !is_number_prefix(chars[index - 1]);
+        if boundary
+            && chars[index] == '0'
+            && index + 1 < len
+            && (chars[index + 1] == 'x' || chars[index + 1] == 'X')
+        {
+            let mut end = index + 2;
+            while end < len && chars[end].is_ascii_hexdigit() {
+                end += 1;
+            }
+            let finished = end == len || (!is_number_prefix(chars[end]) && chars[end] != '.');
+            if end > index + 2 && finished {
+                let digits: String = chars[index + 2..end].iter().collect();
+                let negative = out.ends_with('-');
+                if let Some(decimal) = hex_to_decimal(&digits, negative) {
+                    out.push_str(&decimal);
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn is_number_prefix(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn hex_to_decimal(digits: &str, negative: bool) -> Option<String> {
+    let value = u128::from_str_radix(digits, 16).ok()?;
+    let max = i64::MAX as u128;
+    if value > max && !(negative && value == max + 1) {
+        return None;
+    }
+    Some(value.to_string())
+}
+
 /// Drop `_` between digits outside strings. `1__0` is left alone.
 pub(crate) fn strip_numeric_underscores(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1064,6 +1140,41 @@ mod tests {
             RepairOutcome::Repaired { value, repairs } => {
                 assert_eq!(value["file"], "foo.rs");
                 assert!(repairs.iter().any(|r| r.detail.contains("control")));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hex_numbers_become_decimal() {
+        match repair_tool_call_json("{a: 0x10, b: -0x0A, c: 0X11}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 16);
+                assert_eq!(value["b"], -10);
+                assert_eq!(value["c"], 17);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("hexadecimal"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"0x10"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 0x}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 0x8000000000000000}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{a: 0x7fffffffffffffff}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], i64::MAX);
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
