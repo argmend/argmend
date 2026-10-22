@@ -10,10 +10,29 @@ pub(crate) fn unwrap_fence(raw: &str) -> Option<String> {
     let rest = strip_fence_info(rest);
     let rest = rest.strip_prefix('\n').unwrap_or(rest);
     let end = rest.rfind("```")?;
-    if rest[end + 3..].trim().is_empty() {
+    let tail = &rest[end + 3..];
+    if tail.trim().is_empty() || tail_is_comment(tail) {
         Some(rest[..end].trim().to_string())
     } else {
         None
+    }
+}
+
+/// A comment after the closing fence is not another JSON value.
+fn tail_is_comment(tail: &str) -> bool {
+    let tail = tail.trim();
+    if let Some(rest) = tail.strip_prefix("/*") {
+        let Some(end) = rest.find("*/") else {
+            return false;
+        };
+        return rest[end + 2..].trim().is_empty();
+    }
+    let Some(rest) = tail.strip_prefix("//").or_else(|| tail.strip_prefix('#')) else {
+        return false;
+    };
+    match rest.split_once('\n') {
+        None => true,
+        Some((_, after)) => after.trim().is_empty(),
     }
 }
 
