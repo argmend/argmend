@@ -108,6 +108,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = insert_missing_commas(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("inserted missing commas"));
+        text = cleaned;
+    }
+
     let cleaned = remove_trailing_commas(&text);
     if cleaned != text {
         repairs.push(syntax_note("removed trailing commas"));
@@ -1035,6 +1041,243 @@ pub(crate) fn strip_one_trailing_semicolon(s: &str) -> String {
     body.to_string()
 }
 
+/// Insert a comma between a finished value and the next key or array
+/// element. `{"a":1 2}` is left alone: `2` is not a key.
+pub(crate) fn insert_missing_commas(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut index = 0;
+    let mut stack: Vec<Frame> = Vec::new();
+    while index < len {
+        let ch = chars[index];
+        if ch.is_ascii_whitespace() {
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            separate(&mut out, &mut stack, Atom::String);
+            index = copy_quoted(&chars, index, &mut out);
+            finish_atom(&mut stack, Atom::String);
+            continue;
+        }
+        if ch == '{' || ch == '[' {
+            separate(
+                &mut out,
+                &mut stack,
+                if ch == '{' { Atom::Object } else { Atom::Array },
+            );
+            out.push(ch);
+            stack.push(if ch == '{' {
+                Frame::Object(Phase::Key)
+            } else {
+                Frame::Array { after: false }
+            });
+            index += 1;
+            continue;
+        }
+        if ch == '}' || ch == ']' {
+            out.push(ch);
+            stack.pop();
+            mark_closed(&mut stack);
+            index += 1;
+            continue;
+        }
+        if ch == ',' {
+            out.push(ch);
+            if let Some(Frame::Object(phase)) = stack.last_mut() {
+                *phase = Phase::Key;
+            }
+            if let Some(Frame::Array { after }) = stack.last_mut() {
+                *after = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == ':' {
+            out.push(ch);
+            if let Some(Frame::Object(phase)) = stack.last_mut() {
+                *phase = Phase::Value;
+            }
+            index += 1;
+            continue;
+        }
+        if number_at(&chars, index) {
+            separate(&mut out, &mut stack, Atom::Other);
+            index = copy_number(&chars, index, &mut out);
+            finish_atom(&mut stack, Atom::Other);
+            continue;
+        }
+        if let Some(word) = literal_at(&chars, index) {
+            separate(&mut out, &mut stack, Atom::Other);
+            out.push_str(word);
+            index += word.len();
+            finish_atom(&mut stack, Atom::Other);
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Frame {
+    Object(Phase),
+    Array { after: bool },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Key,
+    Value,
+    After,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Atom {
+    String,
+    Other,
+    Object,
+    Array,
+}
+
+fn separate(out: &mut String, stack: &mut [Frame], atom: Atom) {
+    let Some(frame) = stack.last_mut() else {
+        return;
+    };
+    match frame {
+        Frame::Array { after } => {
+            if *after {
+                out.push(',');
+                *after = false;
+            }
+        }
+        Frame::Object(phase) => {
+            if *phase == Phase::After && atom == Atom::String {
+                out.push(',');
+                *phase = Phase::Key;
+            }
+        }
+    }
+}
+
+fn finish_atom(stack: &mut [Frame], atom: Atom) {
+    let Some(frame) = stack.last_mut() else {
+        return;
+    };
+    match frame {
+        Frame::Array { after } => *after = true,
+        Frame::Object(phase) => {
+            if *phase == Phase::Value || (*phase == Phase::Key && atom != Atom::String) {
+                *phase = Phase::After;
+            }
+        }
+    }
+}
+
+fn mark_closed(stack: &mut [Frame]) {
+    match stack.last_mut() {
+        Some(Frame::Array { after }) => *after = true,
+        Some(Frame::Object(phase)) if *phase == Phase::Value => *phase = Phase::After,
+        _ => {}
+    }
+}
+
+fn copy_quoted(chars: &[char], start: usize, out: &mut String) -> usize {
+    out.push('"');
+    let mut index = start + 1;
+    while index < chars.len() {
+        let ch = chars[index];
+        out.push(ch);
+        index += 1;
+        if ch == '\\' {
+            if index < chars.len() {
+                out.push(chars[index]);
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '"' {
+            break;
+        }
+    }
+    index
+}
+
+fn number_at(chars: &[char], index: usize) -> bool {
+    match chars.get(index) {
+        Some('0'..='9') => true,
+        Some('-') => matches!(chars.get(index + 1), Some('0'..='9')),
+        _ => false,
+    }
+}
+
+fn copy_number(chars: &[char], start: usize, out: &mut String) -> usize {
+    let mut index = start;
+    if chars.get(index) == Some(&'-') {
+        out.push('-');
+        index += 1;
+    }
+    while matches!(chars.get(index), Some('0'..='9')) {
+        out.push(chars[index]);
+        index += 1;
+    }
+    if chars.get(index) == Some(&'.') {
+        out.push('.');
+        index += 1;
+        while matches!(chars.get(index), Some('0'..='9')) {
+            out.push(chars[index]);
+            index += 1;
+        }
+    }
+    if matches!(chars.get(index), Some('e' | 'E')) {
+        let next = index + 1;
+        let exp = if matches!(chars.get(next), Some('+' | '-')) {
+            next + 1
+        } else {
+            next
+        };
+        if matches!(chars.get(exp), Some('0'..='9')) {
+            out.push(chars[index]);
+            index += 1;
+            if matches!(chars.get(index), Some('+' | '-')) {
+                out.push(chars[index]);
+                index += 1;
+            }
+            while matches!(chars.get(index), Some('0'..='9')) {
+                out.push(chars[index]);
+                index += 1;
+            }
+        }
+    }
+    index
+}
+
+fn literal_at(chars: &[char], index: usize) -> Option<&'static str> {
+    for word in ["true", "false", "null"] {
+        let letters: Vec<char> = word.chars().collect();
+        if index + letters.len() > chars.len() {
+            continue;
+        }
+        if chars[index..index + letters.len()] != letters[..] {
+            continue;
+        }
+        let before_ok = index == 0 || !is_ident(chars[index - 1]);
+        let after = index + letters.len();
+        let after_ok = after == chars.len() || !is_ident(chars[after]);
+        if before_ok && after_ok {
+            return Some(word);
+        }
+    }
+    None
+}
+
+fn is_ident(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
 /// Remove trailing commas before `]` or `}`.
 pub(crate) fn remove_trailing_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1320,6 +1563,62 @@ mod tests {
         assert!(matches!(
             repair_tool_call_json("()"),
             RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn missing_commas_are_inserted_between_values() {
+        match repair_tool_call_json(r#"{"a":1 "b":2}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("commas"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: 1 b: 2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("[1 2 3]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, serde_json::json!([1, 2, 3]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{\"a\":[1 2] \"b\":true}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"][0], 1);
+                assert_eq!(value["a"][1], 2);
+                assert_eq!(value["b"], true);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("[true false]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value[0], true);
+                assert_eq!(value[1], false);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1 2}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1,"b":2}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"1, 2"}"#),
+            RepairOutcome::Valid(_)
         ));
     }
 
