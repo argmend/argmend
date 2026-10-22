@@ -1337,6 +1337,52 @@ mod tests {
     }
 
     #[test]
+    fn applicator_accepts_only_when_properties_and_required_hold() {
+        let schema = json!({
+            "if": {
+                "properties": {"flag": {"const": true}},
+                "required": ["flag"]
+            },
+            "then": {"properties": {"n": {"type": "integer"}}},
+            "else": {"properties": {"n": {"type": "string"}}}
+        });
+        let repaired = normalize(&json!({"flag": true, "n": "1"}), &schema).expect("then");
+        assert_eq!(repaired.value["n"], 1);
+        assert_eq!(repaired.value["flag"], true);
+
+        let kept = normalize(&json!({"flag": false, "n": "1"}), &schema).expect("wrong flag");
+        assert_eq!(kept.value["n"], "1");
+        assert!(kept.rewrites.is_empty());
+
+        let kept = normalize(&json!({"n": "1"}), &schema).expect("missing flag");
+        assert_eq!(kept.value["n"], "1");
+        assert!(kept.rewrites.is_empty());
+
+        let clash = json!({
+            "allOf": [
+                {"properties": {"n": {"type": "integer"}}},
+                {"properties": {"n": {"type": "boolean"}}}
+            ]
+        });
+        let kept = normalize(&json!({"n": "1"}), &clash).expect("allof");
+        assert_eq!(kept.value["n"], "1");
+        assert!(kept.rewrites.is_empty());
+
+        let branches = json!({
+            "oneOf": [
+                {"properties": {"n": {"type": "integer"}}, "required": ["n"]},
+                {"properties": {"s": {"type": "string"}}, "required": ["s"]}
+            ]
+        });
+        let repaired = normalize(&json!({"n": "2"}), &branches).expect("one branch");
+        assert_eq!(repaired.value["n"], 2);
+        let kept = normalize(&json!({"n": "2", "s": "a"}), &branches).expect("two branches");
+        assert_eq!(kept.value["n"], "2");
+        assert_eq!(kept.value["s"], "a");
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn if_then_else_follows_the_matching_branch() {
         let schema = json!({
             "if": {"type": "boolean"},
