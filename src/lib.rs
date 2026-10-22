@@ -264,6 +264,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn unclosed_fence_unwraps_when_the_body_is_json() {
+        let raw = "```json\n{file: \"a.rs\"}";
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "edit_file",
+            raw,
+            schema: None,
+        })
+        .expect("unclosed fence");
+        assert_eq!(repaired.value["file"], "a.rs");
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::Fence)
+        );
+        assert!(matches!(
+            repair_json("```json\n{\"a\": 1} {\"b\": 2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn fence_with_trailing_comment_unwraps() {
         for raw in [
             "```json\n{\"a\": 1}\n``` # done",
