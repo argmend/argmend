@@ -305,6 +305,13 @@ fn schema_type_names(schema: &Value) -> Vec<&str> {
 }
 
 fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
+    if let Some(number) = integer_from_exact_float(value, schema) {
+        rewrites.push(rewrite(
+            RewriteKind::NumberString,
+            format!("integer number {number}"),
+        ));
+        return Value::Number(number);
+    }
     let Some(text) = value.as_str() else {
         return value.clone();
     };
@@ -359,6 +366,31 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
         return Value::Number(number);
     }
     value.clone()
+}
+
+/// `1.0` is an integer. `1.5`, a value past 2^53, and a schema that also
+/// allows `number` are left unchanged.
+fn integer_from_exact_float(value: &Value, schema: &Value) -> Option<serde_json::Number> {
+    let types = schema_type_names(schema);
+    if types.is_empty()
+        || types.contains(&"number")
+        || types.contains(&"string")
+        || !types.contains(&"integer")
+    {
+        return None;
+    }
+    if value.as_i64().is_some() || value.as_u64().is_some() {
+        return None;
+    }
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.fract() != 0.0 || number.abs() > (1u64 << 53) as f64 {
+        return None;
+    }
+    let as_int = number as i64;
+    if as_int as f64 != number {
+        return None;
+    }
+    Some(serde_json::Number::from(as_int))
 }
 
 fn integer_string(text: &str) -> Option<serde_json::Number> {

@@ -1294,6 +1294,51 @@ mod tests {
     }
 
     #[test]
+    fn exact_float_is_an_integer_when_the_schema_says_integer() {
+        let schema = json!({"type": "object", "properties": {"n": {"type": "integer"}}});
+        let value: serde_json::Value = serde_json::from_str(r#"{"n":1.0}"#).unwrap();
+        let repaired = normalize(&value, &schema).expect("coerce");
+        assert_eq!(repaired.value["n"].as_i64(), Some(1));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail.contains("integer number"))
+        );
+
+        let negative: serde_json::Value = serde_json::from_str(r#"{"n":-2.0}"#).unwrap();
+        let repaired = normalize(&negative, &schema).expect("negative");
+        assert_eq!(repaired.value["n"].as_i64(), Some(-2));
+
+        let hundred: serde_json::Value = serde_json::from_str(r#"{"n":1e2}"#).unwrap();
+        let repaired = normalize(&hundred, &schema).expect("scientific");
+        assert_eq!(repaired.value["n"].as_i64(), Some(100));
+
+        let fraction: serde_json::Value = serde_json::from_str(r#"{"n":1.5}"#).unwrap();
+        let repaired = normalize(&fraction, &schema).expect("keep fraction");
+        assert!(repaired.value["n"].as_i64().is_none());
+        assert!(repaired.rewrites.is_empty());
+
+        let already: serde_json::Value = serde_json::from_str(r#"{"n":1}"#).unwrap();
+        let repaired = normalize(&already, &schema).expect("already");
+        assert_eq!(repaired.value["n"].as_i64(), Some(1));
+        assert!(repaired.rewrites.is_empty());
+
+        let wide = json!({
+            "type": "object",
+            "properties": {"n": {"type": ["integer", "number"]}}
+        });
+        let repaired = normalize(&value, &wide).expect("union");
+        assert!(repaired.value["n"].as_i64().is_none());
+        assert!(repaired.rewrites.is_empty());
+
+        let huge: serde_json::Value = serde_json::from_str(r#"{"n":1e20}"#).unwrap();
+        let repaired = normalize(&huge, &schema).expect("huge");
+        assert!(repaired.value["n"].as_i64().is_none());
+        assert!(repaired.rewrites.is_empty());
+    }
+
+    #[test]
     fn zero_fraction_integer_string_is_coerced() {
         let schema = json!({
             "type": "object",
