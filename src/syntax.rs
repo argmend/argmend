@@ -229,6 +229,31 @@ pub(crate) fn quote_bare_keys(s: &str) -> String {
                 while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
+                let mut hyphenated = i;
+                loop {
+                    if hyphenated + 1 < len
+                        && chars[hyphenated] == '-'
+                        && (chars[hyphenated + 1].is_ascii_alphanumeric()
+                            || chars[hyphenated + 1] == '_')
+                    {
+                        hyphenated += 1;
+                        while hyphenated < len
+                            && (chars[hyphenated].is_ascii_alphanumeric()
+                                || chars[hyphenated] == '_')
+                        {
+                            hyphenated += 1;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                let mut j = hyphenated;
+                while j < len && chars[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < len && chars[j] == ':' {
+                    i = hyphenated;
+                }
                 let ident: String = chars[start..i].iter().collect();
 
                 // Look ahead past optional whitespace for ':'.
