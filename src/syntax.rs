@@ -108,6 +108,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = quote_bare_values(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("quoted bare values"));
+        text = cleaned;
+    }
+
     let cleaned = insert_missing_commas(&text);
     if cleaned != text {
         repairs.push(syntax_note("inserted missing commas"));
@@ -1041,6 +1047,93 @@ pub(crate) fn strip_one_trailing_semicolon(s: &str) -> String {
     body.to_string()
 }
 
+/// Quote one bare word used as a value. `hello world` is left alone,
+/// because it could be one string or two values. `undefined`, `NaN`,
+/// and `Infinity` are left alone too: null is another faithful repair.
+pub(crate) fn quote_bare_values(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut index = 0;
+    while index < len {
+        if chars[index] == '"' {
+            index = copy_quoted(&chars, index, &mut out);
+            continue;
+        }
+        if starts_bare_word(chars[index]) {
+            let end = bare_word_end(&chars, index);
+            let word: String = chars[index..end].iter().collect();
+            if value_position(&chars, index)
+                && value_boundary(&chars, end)
+                && !reserved_bare_word(&word)
+            {
+                out.push('"');
+                out.push_str(&word);
+                out.push('"');
+            } else {
+                out.push_str(&word);
+            }
+            index = end;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn starts_bare_word(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+fn bare_word_end(chars: &[char], start: usize) -> usize {
+    let mut index = start + 1;
+    let len = chars.len();
+    while index < len && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+        index += 1;
+    }
+    loop {
+        if index + 1 < len
+            && (chars[index] == '-' || chars[index] == '.')
+            && (chars[index + 1].is_ascii_alphanumeric() || chars[index + 1] == '_')
+        {
+            index += 1;
+            while index < len && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+                index += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+fn value_position(chars: &[char], index: usize) -> bool {
+    let mut prev = index;
+    while prev > 0 {
+        prev -= 1;
+        if !chars[prev].is_ascii_whitespace() {
+            return matches!(chars[prev], ':' | '[' | ',');
+        }
+    }
+    false
+}
+
+fn value_boundary(chars: &[char], index: usize) -> bool {
+    let mut next = index;
+    while next < chars.len() && chars[next].is_ascii_whitespace() {
+        next += 1;
+    }
+    next >= chars.len() || matches!(chars[next], ',' | '}' | ']' | '{' | '[' | '"')
+}
+
+fn reserved_bare_word(word: &str) -> bool {
+    matches!(
+        word,
+        "true" | "false" | "null" | "True" | "False" | "None" | "undefined" | "NaN" | "Infinity"
+    )
+}
+
 /// Insert a comma between a finished value and the next key or array
 /// element. `{"a":1 2}` is left alone: `2` is not a key.
 pub(crate) fn insert_missing_commas(s: &str) -> String {
@@ -1563,6 +1656,88 @@ mod tests {
         assert!(matches!(
             repair_tool_call_json("()"),
             RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn bare_words_used_as_values_are_quoted() {
+        match repair_tool_call_json("{a: hello}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "hello");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("bare values"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{"a": hello}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "hello"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("[hello, world]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, serde_json::json!(["hello", "world"]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: hello, b: world}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "hello");
+                assert_eq!(value["b"], "world");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: hello b: world}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "hello");
+                assert_eq!(value["b"], "world");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: foo-bar}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "foo-bar"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: foo.bar}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "foo.bar"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: true}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], true);
+                assert!(
+                    repairs
+                        .iter()
+                        .all(|rewrite| !rewrite.detail.contains("bare values"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{a: hello world}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("[hello world]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: undefined}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("[NaN]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("[Infinity]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"hello"}"#),
+            RepairOutcome::Valid(_)
         ));
     }
 
