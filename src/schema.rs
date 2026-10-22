@@ -1050,16 +1050,25 @@ fn describes_array(schema: &Value) -> bool {
         || schema.get("unevaluatedItems").is_some()
 }
 
-/// `unevaluatedItems: false` closes a tuple whose tail is still open.
-/// An `items` or `additionalItems` schema already evaluated that tail.
+/// `unevaluatedItems: false` closes a tuple whose tail keyword is absent.
+/// `items: true` and `additionalItems: true` already evaluated that tail.
 fn forbid_unevaluated_items<'a>(schema: &'a Value, tail: ArrayTail<'a>) -> ArrayTail<'a> {
     if matches!(tail, ArrayTail::Keep)
+        && unevaluated_tuple_tail(schema)
         && schema.get("unevaluatedItems") == Some(&Value::Bool(false))
     {
         ArrayTail::Forbid
     } else {
         tail
     }
+}
+
+fn unevaluated_tuple_tail(schema: &Value) -> bool {
+    if schema.get("prefixItems").is_some() {
+        return schema.get("items").is_none();
+    }
+    schema.get("items").and_then(Value::as_array).is_some()
+        && schema.get("additionalItems").is_none()
 }
 
 /// `items: false` allows no element. `unevaluatedItems: false` with no

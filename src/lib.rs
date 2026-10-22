@@ -1531,6 +1531,22 @@ mod tests {
 
         let already = normalize(&json!([1, 2]), &prefix).expect_err("already extra");
         assert!(matches!(already, RepairError::Ambiguous(_)), "{already:?}");
+
+        let allowed = json!({
+            "prefixItems": [{"type": "integer"}],
+            "items": true,
+            "unevaluatedItems": false
+        });
+        let repaired = normalize(&json!(["1", 2]), &allowed).expect("items true");
+        assert_eq!(repaired.value, json!([1, 2]));
+
+        let additional = json!({
+            "items": [{"type": "integer"}],
+            "additionalItems": true,
+            "unevaluatedItems": false
+        });
+        let repaired = normalize(&json!(["1", "x"]), &additional).expect("additional true");
+        assert_eq!(repaired.value, json!([1, "x"]));
     }
 
     #[test]
