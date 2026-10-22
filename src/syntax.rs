@@ -96,6 +96,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = replace_key_equals(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("replaced key equals"));
+        text = cleaned;
+    }
+
     let cleaned = quote_bare_keys(&text);
     if cleaned != text {
         repairs.push(syntax_note("quoted bare keys"));
@@ -468,6 +474,96 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
         }
     }
     out
+}
+
+/// Turn `=` into `:` when it separates a key from a value.
+/// `==` stays, and `=` inside a string stays.
+pub(crate) fn replace_key_equals(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut index = 0;
+    while index < len {
+        if chars[index] == '"' {
+            index = copy_quoted(&chars, index, &mut out);
+            continue;
+        }
+        if chars[index] == '=' && key_equals(&chars, index) {
+            out.push(':');
+            index += 1;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn key_equals(chars: &[char], index: usize) -> bool {
+    if chars.get(index + 1) == Some(&'=') {
+        return false;
+    }
+    let Some(end) = last_non_ws(chars, index) else {
+        return false;
+    };
+    let key_at = if chars[end] == '"' {
+        match opening_quote(chars, end) {
+            Some(open) => open,
+            None => return false,
+        }
+    } else if is_key_char(chars[end]) {
+        ident_start(chars, end)
+    } else {
+        return false;
+    };
+    matches!(last_non_ws(chars, key_at), Some(at) if is_key_predecessor(chars[at]))
+}
+
+fn is_key_predecessor(ch: char) -> bool {
+    matches!(ch, '{' | ',' | '"' | '}' | ']') || ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn last_non_ws(chars: &[char], index: usize) -> Option<usize> {
+    let mut prev = index;
+    while prev > 0 {
+        prev -= 1;
+        if !chars[prev].is_ascii_whitespace() {
+            return Some(prev);
+        }
+    }
+    None
+}
+
+fn is_key_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '-' || ch == '.'
+}
+
+fn ident_start(chars: &[char], end: usize) -> usize {
+    let mut index = end;
+    while index > 0 && is_key_char(chars[index - 1]) {
+        index -= 1;
+    }
+    index
+}
+
+fn opening_quote(chars: &[char], close: usize) -> Option<usize> {
+    let mut index = close;
+    while index > 0 {
+        index -= 1;
+        if chars[index] != '"' {
+            continue;
+        }
+        let mut slashes = 0;
+        let mut back = index;
+        while back > 0 && chars[back - 1] == '\\' {
+            slashes += 1;
+            back -= 1;
+        }
+        if slashes % 2 == 0 {
+            return Some(index);
+        }
+    }
+    None
 }
 
 /// Wrap bare (unquoted) object keys in double quotes.
@@ -1656,6 +1752,63 @@ mod tests {
         assert!(matches!(
             repair_tool_call_json("()"),
             RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn key_equals_becomes_a_colon() {
+        match repair_tool_call_json(r#"{"a"=1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("equals"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a=1, b=2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a=1 b=2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{a = "x"}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "x"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a=hello}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "hello"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{'a'=1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"b=c"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a==1}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: b=c}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1}"#),
+            RepairOutcome::Valid(_)
         ));
     }
 
