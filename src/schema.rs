@@ -311,18 +311,61 @@ fn violates_unique(schema: &Value, value: &Value) -> bool {
         .any(|(index, item)| items[..index].contains(item))
 }
 
-/// A positive integer `multipleOf`. Zero and non-integers are not checked.
+/// A positive `multipleOf`. Zero, negatives, and values that do not parse
+/// as exact decimals are not checked.
 fn violates_multiple(schema: &Value, value: &Value) -> bool {
-    let Some(multiple) = schema.get("multipleOf").and_then(Value::as_i64) else {
+    let Some(multiple) = schema.get("multipleOf").and_then(Value::as_number) else {
         return false;
     };
-    if multiple <= 0 {
+    let Some(factor) = multiple.as_f64() else {
+        return false;
+    };
+    if !factor.is_finite() || factor <= 0.0 {
         return false;
     }
-    let Some(number) = value.as_i64() else {
+    let Some(number) = value.as_number() else {
         return false;
     };
-    number % multiple != 0
+    let (Some(left), Some(right)) = (
+        parse_decimal(&number.to_string()),
+        parse_decimal(&multiple.to_string()),
+    ) else {
+        return false;
+    };
+    decimal_divides(&left, &right) == Some(false)
+}
+
+fn decimal_divides(value: &Decimal, multiple: &Decimal) -> Option<bool> {
+    if multiple.coef == 0 {
+        return Some(false);
+    }
+    if value.coef == 0 {
+        return Some(true);
+    }
+    let exp = value.exp10.checked_sub(multiple.exp10)?;
+    if exp >= 0 {
+        let factor = pow10(exp)?;
+        let scaled = value.coef.checked_mul(factor)?;
+        Some(scaled.is_multiple_of(multiple.coef))
+    } else {
+        let factor = pow10(-exp)?;
+        let divisor = multiple.coef.checked_mul(factor)?;
+        if divisor == 0 {
+            return Some(false);
+        }
+        Some(value.coef.is_multiple_of(divisor))
+    }
+}
+
+fn pow10(exp: i32) -> Option<u128> {
+    if !(0..=38).contains(&exp) {
+        return None;
+    }
+    let mut factor: u128 = 1;
+    for _ in 0..exp {
+        factor = factor.checked_mul(10)?;
+    }
+    Some(factor)
 }
 
 fn violates_bounds(schema: &Value, value: &Value) -> bool {

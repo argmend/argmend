@@ -1559,6 +1559,32 @@ mod tests {
     }
 
     #[test]
+    fn decimal_multiple_of_rejects_a_coercion_that_does_not_divide() {
+        let schema = json!({"type": "number", "multipleOf": 0.5});
+        let err = normalize(&json!("1.25"), &schema).expect_err("quarter");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("1.5"), &schema).expect("half");
+        assert_eq!(repaired.value.as_f64(), Some(1.5));
+        let repaired = normalize(&json!("-1.5"), &schema).expect("negative");
+        assert_eq!(repaired.value.as_f64(), Some(-1.5));
+
+        let kept = normalize(&json!(1.25), &schema).expect("already");
+        assert_eq!(kept.value.as_f64(), Some(1.25));
+        assert!(kept.rewrites.is_empty());
+
+        let property = json!({
+            "properties": {"n": {"type": "number", "multipleOf": 0.25}}
+        });
+        let repaired = normalize(&json!({"n": "1.25"}), &property).expect("quarter fits");
+        assert_eq!(repaired.value["n"].as_f64(), Some(1.25));
+        let bad = json!({
+            "properties": {"n": {"type": "number", "multipleOf": 0.5}}
+        });
+        let err = normalize(&json!({"n": "1.75"}), &bad).expect_err("not half");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn multiple_of_rejects_a_coercion_that_is_not_a_multiple() {
         let schema = json!({"type": "integer", "multipleOf": 2});
         let err = normalize(&json!("3"), &schema).expect_err("odd");
