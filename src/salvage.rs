@@ -7,16 +7,31 @@ use crate::{RepairError, RepairOutcome, Rewrite};
 pub(crate) fn unwrap_fence(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     let rest = trimmed.strip_prefix("```")?;
-    let rest = rest
-        .strip_prefix("json")
-        .or_else(|| rest.strip_prefix("JSON"))
-        .unwrap_or(rest);
+    let rest = strip_fence_info(rest);
     let rest = rest.strip_prefix('\n').unwrap_or(rest);
     let end = rest.rfind("```")?;
     if rest[end + 3..].trim().is_empty() {
         Some(rest[..end].trim().to_string())
     } else {
         None
+    }
+}
+
+/// Drop a fence info string such as `json` or `jsonc` when it is a tag.
+fn strip_fence_info(rest: &str) -> &str {
+    let end = rest
+        .char_indices()
+        .find(|(_, ch)| !ch.is_ascii_alphabetic())
+        .map(|(idx, _)| idx)
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return rest;
+    }
+    let after = &rest[end..];
+    if after.starts_with(['{', '[', ' ', '\t', '\n', '\r']) || after.is_empty() {
+        after
+    } else {
+        rest
     }
 }
 

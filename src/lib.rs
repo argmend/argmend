@@ -240,6 +240,24 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn fence_with_jsonc_tag_unwraps() {
+        let raw = "```jsonc\n{file: \"a.rs\"}\n```";
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "edit_file",
+            raw,
+            schema: None,
+        })
+        .expect("jsonc");
+        assert_eq!(repaired.value["file"], "a.rs");
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::Fence)
+        );
+    }
+
+    #[test]
     fn fence_then_bare_key() {
         let raw = "```json\n{file: \"a.rs\"}\n```";
         match repair_json(raw) {
