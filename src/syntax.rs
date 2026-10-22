@@ -102,6 +102,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = insert_missing_colons(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("inserted missing colons"));
+        text = cleaned;
+    }
+
     let cleaned = quote_bare_keys(&text);
     if cleaned != text {
         repairs.push(syntax_note("quoted bare keys"));
@@ -570,6 +576,142 @@ fn opening_quote(chars: &[char], close: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Insert `:` between a key and the next value when the colon is missing.
+/// `{a}` stays unchanged: there is no value. `{a hello world}` stays
+/// unchanged after the colon, because two words are still ambiguous.
+pub(crate) fn insert_missing_colons(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut index = 0;
+    let mut stack: Vec<ColonNest> = Vec::new();
+    while index < len {
+        let ch = chars[index];
+        if ch.is_ascii_whitespace() {
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            let keyish = colon_keyish(&stack);
+            index = copy_quoted(&chars, index, &mut out);
+            if keyish && colon_needed(&chars, index) {
+                out.push(':');
+                set_colon_mode(&mut stack, ColonMode::Value);
+            } else if !keyish {
+                finish_colon_value(&mut stack);
+            }
+            continue;
+        }
+        if ch == '{' {
+            out.push(ch);
+            stack.push(ColonNest::Object(ColonMode::Key));
+            index += 1;
+            continue;
+        }
+        if ch == '[' {
+            out.push(ch);
+            stack.push(ColonNest::Array);
+            index += 1;
+            continue;
+        }
+        if ch == '}' || ch == ']' {
+            out.push(ch);
+            stack.pop();
+            finish_colon_value(&mut stack);
+            index += 1;
+            continue;
+        }
+        if ch == ':' {
+            out.push(ch);
+            set_colon_mode(&mut stack, ColonMode::Value);
+            index += 1;
+            continue;
+        }
+        if ch == ',' {
+            out.push(ch);
+            set_colon_mode(&mut stack, ColonMode::Key);
+            index += 1;
+            continue;
+        }
+        if starts_bare_word(ch) || ch == '$' {
+            let end = bare_word_end(&chars, index);
+            let keyish = colon_keyish(&stack);
+            out.extend(chars[index..end].iter().copied());
+            index = end;
+            if keyish && colon_needed(&chars, index) {
+                out.push(':');
+                set_colon_mode(&mut stack, ColonMode::Value);
+            } else if !keyish {
+                finish_colon_value(&mut stack);
+            }
+            continue;
+        }
+        if number_at(&chars, index) {
+            index = copy_number(&chars, index, &mut out);
+            finish_colon_value(&mut stack);
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ColonNest {
+    Object(ColonMode),
+    Array,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ColonMode {
+    Key,
+    Value,
+    After,
+}
+
+fn colon_keyish(stack: &[ColonNest]) -> bool {
+    matches!(
+        stack.last(),
+        Some(ColonNest::Object(ColonMode::Key | ColonMode::After))
+    )
+}
+
+fn set_colon_mode(stack: &mut [ColonNest], mode: ColonMode) {
+    if let Some(ColonNest::Object(slot)) = stack.last_mut() {
+        *slot = mode;
+    }
+}
+
+fn finish_colon_value(stack: &mut [ColonNest]) {
+    if let Some(ColonNest::Object(slot)) = stack.last_mut()
+        && *slot == ColonMode::Value
+    {
+        *slot = ColonMode::After;
+    }
+}
+
+fn colon_needed(chars: &[char], index: usize) -> bool {
+    let mut next = index;
+    while next < chars.len() && chars[next].is_ascii_whitespace() {
+        next += 1;
+    }
+    let Some(ch) = chars.get(next).copied() else {
+        return false;
+    };
+    if matches!(ch, ':' | ',' | '}' | ']') {
+        return false;
+    }
+    ch == '"'
+        || ch == '{'
+        || ch == '['
+        || ch == '-'
+        || ch == '_'
+        || ch.is_ascii_digit()
+        || ch.is_ascii_alphabetic()
 }
 
 /// Wrap bare (unquoted) object keys in double quotes.
@@ -1812,6 +1954,64 @@ mod tests {
             repair_tool_call_json("()"),
             RepairOutcome::Unfixable(_)
         ));
+    }
+
+    #[test]
+    fn missing_colons_are_inserted_before_values() {
+        match repair_tool_call_json("{a 1}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("colon"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{"a" 1}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a 1 b 2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a hello}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "hello"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"["a" "b"]"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, serde_json::json!(["a", "b"]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{a}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a hello world}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1}"#),
+            RepairOutcome::Valid(_)
+        ));
+        match repair_tool_call_json("{a:1}") {
+            RepairOutcome::Repaired { repairs, .. } => {
+                assert!(
+                    repairs
+                        .iter()
+                        .all(|rewrite| !rewrite.detail.contains("colon"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
     }
 
     #[test]
