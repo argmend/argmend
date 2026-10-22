@@ -60,6 +60,16 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value misses a dependent property".into(),
             ));
         }
+        if violates_length(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value is outside the schema length".into(),
+            ));
+        }
+        if violates_property_names(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value has a property name outside the schema".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -440,13 +450,16 @@ fn known_constraint(schema: &Value) -> bool {
         || schema.get("properties").is_some()
         || schema.get("required").is_some()
         || schema.get("dependentRequired").is_some()
+        || schema.get("minLength").is_some()
+        || schema.get("maxLength").is_some()
+        || schema.get("propertyNames").is_some()
         || schema.get("items").is_some()
         || schema.get("prefixItems").is_some()
 }
 
 /// Type, `const`, `enum`, properties, array items, `required` names,
-/// dependent names, `not`, numeric bounds, `multipleOf`, `uniqueItems`,
-/// `contains`, and size limits.
+/// dependent names, string length, property names, `not`, numeric bounds,
+/// `multipleOf`, `uniqueItems`, `contains`, and size limits.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
     constraints_hold(schema, value)
         && properties_match(schema, value)
@@ -459,6 +472,48 @@ fn branch_accepts(schema: &Value, value: &Value) -> bool {
         && !violates_contains(schema, value)
         && !violates_size(schema, value)
         && !violates_dependent(schema, value)
+        && !violates_length(schema, value)
+        && !violates_property_names(schema, value)
+}
+
+/// `minLength` and `maxLength` count characters. A limit that is not an
+/// integer is ignored. A non-string value is not checked.
+fn violates_length(schema: &Value, value: &Value) -> bool {
+    let Some(text) = value.as_str() else {
+        return false;
+    };
+    let len = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+    if let Some(max) = integer_limit(schema, "maxLength")
+        && len > max
+    {
+        return true;
+    }
+    if let Some(min) = integer_limit(schema, "minLength")
+        && len < min
+    {
+        return true;
+    }
+    false
+}
+
+/// Each object key must satisfy `propertyNames`.
+fn violates_property_names(schema: &Value, value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    let schema = if schema.get("properties").is_none() {
+        schema.get("parameters").unwrap_or(schema)
+    } else {
+        schema
+    };
+    let Some(names) = schema
+        .get("propertyNames")
+        .filter(|schema| schema.is_object())
+    else {
+        return false;
+    };
+    obj.keys()
+        .any(|key| !branch_accepts(names, &Value::String(key.clone())))
 }
 
 /// `dependentRequired`, and the array form of `dependencies`.
