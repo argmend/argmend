@@ -1456,6 +1456,42 @@ mod tests {
     }
 
     #[test]
+    fn unevaluated_properties_false_drops_one_unknown_key() {
+        let schema = json!({
+            "properties": {"a": {"type": "integer"}},
+            "unevaluatedProperties": false
+        });
+        let repaired = normalize(&json!({"a": "1", "b": 2}), &schema).expect("drop");
+        assert_eq!(repaired.value, json!({"a": 1}));
+
+        let err = normalize(&json!({"b": "1"}), &schema).expect_err("only");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let err = normalize(&json!({"a": "1", "b": 2, "c": 3}), &schema).expect_err("two");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let repaired = normalize(&json!({"a": "1"}), &schema).expect("known");
+        assert_eq!(repaired.value, json!({"a": 1}));
+
+        let patterned = json!({
+            "properties": {"a": {"type": "integer"}},
+            "patternProperties": {"^x-": {"type": "string"}},
+            "unevaluatedProperties": false
+        });
+        let err = normalize(&json!({"a": "1", "x-note": "hi"}), &patterned).expect_err("pattern");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let already = normalize(&json!({"a": 1, "b": 2}), &schema).expect("already");
+        assert_eq!(already.value, json!({"a": 1}));
+        assert!(
+            already
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail.contains("dropped"))
+        );
+    }
+
+    #[test]
     fn size_limits_reject_a_coercion_past_the_bound() {
         let props = json!({
             "properties": {

@@ -876,8 +876,9 @@ fn normalize_object(
             )));
         }
         if unknown.len() > 1 {
+            let reason = unknown_denial(schema).unwrap_or("unknown keys are forbidden");
             return Err(RepairError::Ambiguous(format!(
-                "{} unknown keys and additionalProperties is false",
+                "{} unknown keys and {reason}",
                 unknown.len()
             )));
         }
@@ -972,12 +973,27 @@ fn additional_properties_schema(schema: &Value) -> Option<&Value> {
 }
 
 fn denies_unknown(schema: &Value) -> bool {
+    unknown_denial(schema).is_some()
+}
+
+/// `additionalProperties: false`, or `unevaluatedProperties: false` when
+/// `additionalProperties` is absent. A subschema that lists the key is not
+/// visible here, so a pattern still refuses the drop.
+fn unknown_denial(schema: &Value) -> Option<&'static str> {
     let schema = if schema.get("properties").is_none() {
         schema.get("parameters").unwrap_or(schema)
     } else {
         schema
     };
-    matches!(schema.get("additionalProperties"), Some(Value::Bool(false)))
+    if matches!(schema.get("additionalProperties"), Some(Value::Bool(false))) {
+        return Some("additionalProperties is false");
+    }
+    if schema.get("additionalProperties").is_none()
+        && schema.get("unevaluatedProperties") == Some(&Value::Bool(false))
+    {
+        return Some("unevaluatedProperties is false");
+    }
+    None
 }
 
 fn required_holds(schema: &Value, value: &Value) -> bool {
