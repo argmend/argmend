@@ -520,13 +520,13 @@ fn violates_property_names(schema: &Value, value: &Value) -> bool {
 }
 
 /// `pattern` and `format` need a matcher this crate does not have.
-/// Any other unchecked keyword is the same: do not guess that a name fits.
+/// Any other unchecked keyword is the same, including one nested under `not`.
 fn names_schema_is_partial(schema: &Value) -> bool {
     let Some(map) = schema.as_object() else {
         return false;
     };
-    map.keys().any(|key| {
-        !matches!(
+    map.iter().any(|(key, child)| {
+        let checked = matches!(
             key.as_str(),
             "type"
                 | "const"
@@ -539,7 +539,11 @@ fn names_schema_is_partial(schema: &Value) -> bool {
                 | "exclusiveMinimum"
                 | "exclusiveMaximum"
                 | "multipleOf"
-        )
+        );
+        if !checked {
+            return true;
+        }
+        key == "not" && (!child.is_object() || names_schema_is_partial(child))
     })
 }
 
