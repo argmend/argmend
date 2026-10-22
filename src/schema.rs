@@ -40,6 +40,11 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value repeats an array item".into(),
             ));
         }
+        if violates_contains(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value misses contains".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -378,7 +383,7 @@ fn known_constraint(schema: &Value) -> bool {
 }
 
 /// Type, `const`, `enum`, properties, array items, `required` names,
-/// `not`, numeric bounds, `multipleOf`, and `uniqueItems`.
+/// `not`, numeric bounds, `multipleOf`, `uniqueItems`, and `contains`.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
     constraints_hold(schema, value)
         && properties_match(schema, value)
@@ -388,6 +393,43 @@ fn branch_accepts(schema: &Value, value: &Value) -> bool {
         && !violates_bounds(schema, value)
         && !violates_multiple(schema, value)
         && !violates_unique(schema, value)
+        && !violates_contains(schema, value)
+}
+
+/// `contains` fails when too few or too many items match.
+/// `minContains` defaults to 1. A limit that is not an integer is ignored.
+fn violates_contains(schema: &Value, value: &Value) -> bool {
+    let Some(contains) = schema.get("contains").filter(|schema| schema.is_object()) else {
+        return false;
+    };
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    let Some((min, max)) = contain_limits(schema) else {
+        return false;
+    };
+    let count = u64::try_from(
+        items
+            .iter()
+            .filter(|item| branch_accepts(contains, item))
+            .count(),
+    )
+    .unwrap_or(u64::MAX);
+    count < min || max.is_some_and(|limit| count > limit)
+}
+
+fn contain_limits(schema: &Value) -> Option<(u64, Option<u64>)> {
+    let min = match schema.get("minContains") {
+        None => 1,
+        Some(Value::Number(number)) => number.as_u64()?,
+        Some(_) => return None,
+    };
+    let max = match schema.get("maxContains") {
+        None => None,
+        Some(Value::Number(number)) => Some(number.as_u64()?),
+        Some(_) => return None,
+    };
+    Some((min, max))
 }
 
 fn elements_match(schema: &Value, value: &Value) -> bool {
