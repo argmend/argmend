@@ -123,7 +123,8 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
     }
 
     match salvage::xml_parameters(&body)? {
-        Some(value) => {
+        Some((value, more)) => {
+            prefix.extend(more);
             prefix.push(note(RewriteKind::XmlParameters, "read xml parameters"));
             Ok((value, prefix))
         }
@@ -404,6 +405,29 @@ mod tests {
     }
 
     #[test]
+    fn unknown_key_stays_unfixed_when_required_is_missing() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"file": {"type": "string"}},
+            "required": ["file"]
+        });
+        let err = normalize(&json!({"note": "x"}), &schema).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
+    fn only_unknown_key_is_not_dropped() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"file": {"type": "string"}}
+        });
+        let err = normalize(&json!({"note": "x"}), &schema).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn one_unknown_key_is_dropped_when_required_is_present() {
         let schema = json!({
             "type": "object",
@@ -435,5 +459,132 @@ mod tests {
             RepairOutcome::Unfixable(_)
         ));
         assert!(matches!(repair_json(""), RepairOutcome::Unfixable(_)));
+    }
+
+    #[test]
+    fn inexact_decimal_string_stays_a_string() {
+        let schema = json!({"type": "object", "properties": {"n": {"type": "number"}}});
+        let repaired = normalize(&json!({"n": "9007199254740993.5"}), &schema).expect("keep");
+        assert_eq!(repaired.value["n"], "9007199254740993.5");
+        assert!(repaired.rewrites.is_empty(), "{:?}", repaired.rewrites);
+    }
+
+    #[test]
+    fn exact_decimal_string_is_still_coerced() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tenth": {"type": "number"},
+                "half": {"type": "number"}
+            }
+        });
+        let repaired = normalize(&json!({"tenth": "0.1", "half": "1.5"}), &schema).expect("coerce");
+        assert_eq!(repaired.value["tenth"], json!(0.1));
+        assert_eq!(repaired.value["half"], json!(1.5));
+    }
+
+    #[test]
+    fn unclosed_block_comment_does_not_drop_later_keys() {
+        let raw = r#"{"file": "a.rs" /* , "cmd": "rm" }"#;
+        assert!(matches!(repair_json(raw), RepairOutcome::Unfixable(_)));
+        assert!(matches!(
+            repair_json(r#"{"a": 1} /*"#),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn bare_opener_is_not_an_empty_container() {
+        assert!(matches!(repair_json("{"), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("["), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("[{"), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("[1,"), RepairOutcome::Unfixable(_)));
+    }
+
+    #[test]
+    fn complete_array_still_closes() {
+        match repair_json("[1, 2") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, json!([1, 2]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xml_truncated_container_is_unfixable() {
+        let raw = r#"<parameter name="meta">{</parameter>"#;
+        assert!(matches!(repair_json(raw), RepairOutcome::Unfixable(_)));
+    }
+
+    #[test]
+    fn xml_json_container_is_repaired_not_stringified() {
+        let raw = r#"<parameter name="meta">{ "ok": true, }</parameter><parameter name="file">a.rs</parameter>"#;
+        match repair_json(raw) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["meta"]["ok"], true);
+                assert_eq!(value["file"], "a.rs");
+                assert!(
+                    repairs.iter().any(|item| item.kind == RewriteKind::Syntax),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::XmlParameters)
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_quoted_apostrophe_and_newline() {
+        match repair_json(r"{'a': 'it\'s // fine'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "it's // fine");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{'msg': 'line1\nline2'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["msg"], "line1\nline2");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn python_literals_become_json_values() {
+        match repair_json("{a: True, b: False, c: None, items: [True, None]}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], true);
+                assert_eq!(value["b"], false);
+                assert_eq!(value["c"], json!(null));
+                assert_eq!(value["items"][0], true);
+                assert_eq!(value["items"][1], json!(null));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{True: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["True"], 1);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json(r#"{"a": "True"}"#),
+            RepairOutcome::Valid(_)
+        ));
+    }
+
+    #[test]
+    fn single_quoted_url_is_not_cut_at_the_slashes() {
+        match repair_json("{'url': 'http://example.com/a'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["url"], "http://example.com/a");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
     }
 }

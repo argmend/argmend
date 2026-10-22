@@ -62,6 +62,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = replace_python_literals(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("replaced Python literals"));
+        text = cleaned;
+    }
+
     let cleaned = remove_trailing_commas(&text);
     if cleaned != text {
         repairs.push(syntax_note("removed trailing commas"));
@@ -138,19 +144,26 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                 i += 1;
                 while i < len && chars[i] != '\'' {
                     if chars[i] == '\\' {
-                        out.push(chars[i]);
                         i += 1;
                         if i < len {
-                            out.push(chars[i]);
+                            // `\'` is an apostrophe. Copied through, it is
+                            // not a legal JSON escape, so the repair failed.
+                            if chars[i] == '\'' {
+                                out.push('\'');
+                            } else {
+                                out.push('\\');
+                                out.push(chars[i]);
+                            }
                             i += 1;
                         }
                     } else {
-                        // Escape embedded double quotes inside the
-                        // converted string.
-                        if chars[i] == '"' {
-                            out.push('\\');
+                        match chars[i] {
+                            '"' => out.push_str("\\\""),
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
+                            other => out.push(other),
                         }
-                        out.push(chars[i]);
                         i += 1;
                     }
                 }
@@ -274,6 +287,77 @@ pub(crate) fn fix_triple_quotes(s: &str) -> String {
     out
 }
 
+/// Replace bare Python `True` / `False` / `None` values with JSON.
+///
+/// A following `:` means the word is a key, so it is left alone.
+pub(crate) fn replace_python_literals(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        match chars[i] {
+            '"' => {
+                out.push('"');
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' {
+                        out.push(chars[i]);
+                        i += 1;
+                        if i < len {
+                            out.push(chars[i]);
+                            i += 1;
+                        }
+                    } else {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    out.push('"');
+                    i += 1;
+                }
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                let start = i;
+                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let ident: String = chars[start..i].iter().collect();
+                let mut j = i;
+                while j < len && chars[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let is_key = j < len && chars[j] == ':';
+                if !is_key {
+                    match ident.as_str() {
+                        "True" => {
+                            out.push_str("true");
+                            continue;
+                        }
+                        "False" => {
+                            out.push_str("false");
+                            continue;
+                        }
+                        "None" => {
+                            out.push_str("null");
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                out.push_str(&ident);
+            }
+            other => {
+                out.push(other);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Remove trailing commas before `]` or `}`.
 pub(crate) fn remove_trailing_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -330,6 +414,10 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 }
 
 /// Strip `//` line comments and `/* ... */` block comments.
+///
+/// Single-quoted strings are skipped, same as double-quoted strings.
+/// Quote repair runs after this stage, so `//` inside `'http://example.com'`
+/// is part of the value.
 pub(crate) fn strip_json_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -338,11 +426,11 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
 
     while i < len {
         match chars[i] {
-            // Skip over strings.
-            '"' => {
-                out.push('"');
+            '"' | '\'' => {
+                let quote = chars[i];
+                out.push(quote);
                 i += 1;
-                while i < len && chars[i] != '"' {
+                while i < len && chars[i] != quote {
                     if chars[i] == '\\' {
                         out.push(chars[i]);
                         i += 1;
@@ -356,7 +444,7 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                     }
                 }
                 if i < len {
-                    out.push('"');
+                    out.push(quote);
                     i += 1;
                 }
             }
@@ -368,13 +456,25 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                         i += 1;
                     }
                 } else if chars[i + 1] == '*' {
-                    // Block comment: skip until "*/".
+                    // A closed block comment is removed. An unclosed one is
+                    // kept: dropping the tail and then inventing `}` would
+                    // change the object.
+                    let start = i;
                     i += 2;
-                    while i + 1 < len && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    let mut closed = false;
+                    while i + 1 < len {
+                        if chars[i] == '*' && chars[i + 1] == '/' {
+                            i += 2;
+                            closed = true;
+                            break;
+                        }
                         i += 1;
                     }
-                    if i + 1 < len {
-                        i += 2; // skip "*/"
+                    if !closed {
+                        for ch in &chars[start..] {
+                            out.push(*ch);
+                        }
+                        break;
                     }
                 } else {
                     out.push(chars[i]);
@@ -603,6 +703,30 @@ mod tests {
         let input = r#"{"url": "https://x.com"}"#;
         let out = strip_json_comments(input);
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn unclosed_block_comment_is_left_in_place() {
+        let input = r#"{"file": "a.rs" /* , "cmd": "rm" }"#;
+        assert_eq!(strip_json_comments(input), input);
+    }
+
+    #[test]
+    fn strip_json_comments_inside_single_quoted_string() {
+        let input = "{'url': 'http://example.com/a', 'note': 'keep /* this */'}";
+        assert_eq!(strip_json_comments(input), input);
+    }
+
+    #[test]
+    fn single_quoted_url_keeps_the_path_and_drops_the_trailing_comment() {
+        let input = "{'url': 'http://example.com/a', 'note': 'keep /* this */'} // tail";
+        match repair_tool_call_json(input) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["url"], "http://example.com/a");
+                assert_eq!(value["note"], "keep /* this */");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
     }
 
     #[test]
