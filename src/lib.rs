@@ -42,6 +42,7 @@ pub enum RewriteKind {
     Alias,
     BoolString,
     NumberString,
+    NullString,
     DroppedUnknown,
     Empty,
 }
@@ -1164,6 +1165,32 @@ mod tests {
         assert_eq!(repaired.value["n"], "03.0");
         let repaired = normalize(&json!({"n": "1e2"}), &schema).expect("keep scientific");
         assert_eq!(repaired.value["n"], "1e2");
+    }
+
+    #[test]
+    fn null_string_is_coerced_when_the_schema_is_null() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "z": {"type": "null"},
+                "s": {"type": ["null", "string"]},
+                "b": {"type": "boolean"}
+            }
+        });
+        let repaired =
+            normalize(&json!({"z": " null ", "s": "null", "b": "null"}), &schema).expect("null");
+        assert!(repaired.value["z"].is_null());
+        assert_eq!(repaired.value["s"], "null");
+        assert_eq!(repaired.value["b"], "null");
+        assert!(repaired.rewrites.iter().any(|rewrite| {
+            rewrite.kind == RewriteKind::NullString && rewrite.detail == "null string null"
+        }));
+        let repaired = normalize(&json!({"z": "NULL"}), &schema).expect("upper");
+        assert!(repaired.value["z"].is_null());
+        let repaired = normalize(&json!({"z": "None"}), &schema).expect("none");
+        assert_eq!(repaired.value["z"], "None");
+        let repaired = normalize(&json!({"z": "null story"}), &schema).expect("story");
+        assert_eq!(repaired.value["z"], "null story");
     }
 
     #[test]
