@@ -32,7 +32,7 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
             return Ok((next, rewrites));
         }
     }
-    if schema_type_names(schema).contains(&"array")
+    if describes_array(schema)
         && let Some(arr) = coerced.as_array()
     {
         let (next, more) = normalize_array(arr, schema)?;
@@ -255,6 +255,19 @@ fn required_present(schema: &Value, out: &Map<String, Value>) -> bool {
         .iter()
         .filter_map(Value::as_str)
         .all(|name| out.contains_key(name))
+}
+
+/// An array value uses `items` or `prefixItems` even when `type` is omitted.
+/// An explicit non-array type does not.
+fn describes_array(schema: &Value) -> bool {
+    let types = schema_type_names(schema);
+    if types.contains(&"array") {
+        return true;
+    }
+    if !types.is_empty() {
+        return false;
+    }
+    schema.get("items").is_some() || schema.get("prefixItems").is_some()
 }
 
 fn schema_type_names(schema: &Value) -> Vec<&str> {
