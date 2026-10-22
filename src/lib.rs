@@ -1247,6 +1247,43 @@ mod tests {
     }
 
     #[test]
+    fn tuple_items_coerce_by_position() {
+        let schema = json!({
+            "type": "array",
+            "items": [{"type": "integer"}, {"type": "boolean"}]
+        });
+        let repaired = normalize(&json!(["1", " true "]), &schema).expect("tuple");
+        assert_eq!(repaired.value[0], 1);
+        assert_eq!(repaired.value[1], true);
+        let repaired = normalize(&json!(["1", "true", "x"]), &schema).expect("extra");
+        assert_eq!(repaired.value[2], "x");
+
+        let closed = json!({
+            "type": "array",
+            "items": [{"type": "integer"}],
+            "additionalItems": false
+        });
+        let err = normalize(&json!(["1", "no"]), &closed).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!(["4"]), &closed).expect("exact");
+        assert_eq!(repaired.value[0], 4);
+
+        let prefix = json!({
+            "type": "array",
+            "prefixItems": [{"type": "integer"}],
+            "items": {"type": "boolean"}
+        });
+        let repaired = normalize(&json!(["2", "false"]), &prefix).expect("prefix");
+        assert_eq!(repaired.value[0], 2);
+        assert_eq!(repaired.value[1], false);
+
+        let every = json!({"type": "array", "items": {"type": "integer"}});
+        let repaired = normalize(&json!(["2", "3"]), &every).expect("every");
+        assert_eq!(repaired.value[0], 2);
+        assert_eq!(repaired.value[1], 3);
+    }
+
+    #[test]
     fn empty_fraction_string_is_an_integer() {
         let schema = json!({
             "type": "object",
