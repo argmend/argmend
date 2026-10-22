@@ -212,19 +212,25 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 
 /// Parse `raw`, then apply [`normalize`] when a schema is present.
 ///
-/// Empty input is `{}`.
+/// Blank input is `{}`, `[]`, or null, matching the schema type.
 pub fn repair_args(request: &RepairRequest<'_>) -> Result<Repaired, RepairError> {
     if is_blank_input(request.raw) {
         let value = blank_value(request.schema).map_err(|err| named(request.tool_name, err))?;
+        let detail = match &value {
+            Value::Array(_) => "empty input is []",
+            Value::Null => "empty input is null",
+            _ => "empty input is {}",
+        };
         let mut repaired = Repaired {
             value,
             rewrites: vec![Rewrite {
                 kind: RewriteKind::Empty,
-                detail: "empty input is {}".into(),
+                detail: detail.into(),
             }],
         };
         if let Some(schema) = request.schema {
-            let normalized = normalize(&repaired.value, schema)?;
+            let normalized =
+                normalize(&repaired.value, schema).map_err(|err| named(request.tool_name, err))?;
             repaired.value = normalized.value;
             repaired.rewrites.extend(normalized.rewrites);
         }
@@ -638,7 +644,7 @@ mod tests {
             repaired
                 .rewrites
                 .iter()
-                .any(|item| item.kind == RewriteKind::Empty)
+                .any(|item| { item.kind == RewriteKind::Empty && item.detail.contains("[]") })
         );
 
         let text = json!({"type": "string"});
