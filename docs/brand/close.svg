@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#F3EEE6"/>
+  <defs>
+    <clipPath id="ink"><rect x="0" y="0" width="512" height="336"/></clipPath>
+    <clipPath id="hook"><rect x="0" y="330" width="512" height="182"/></clipPath>
+  </defs>
+  <path clip-path="url(#ink)" d="M442 70 H320 C268 70 256 108 256 156 V196 C256 224 190 244 70 256 C190 268 256 288 256 316 V356 C256 404 268 442 320 442 H442" fill="none" stroke="#1C1917" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+  <path clip-path="url(#hook)" d="M442 70 H320 C268 70 256 108 256 156 V196 C256 224 190 244 70 256 C190 268 256 288 256 316 V356 C256 404 268 442 320 442 H442" fill="none" stroke="#D24A2C" stroke-width="88" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
