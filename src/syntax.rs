@@ -9,14 +9,33 @@ use super::{RepairError, RepairOutcome, Rewrite, RewriteKind};
 /// Attempt to parse `raw` as JSON, applying progressive repairs if the
 /// initial parse fails.
 ///
-/// Repair stages (applied cumulatively):
-/// 1. Strip control characters (except `\n`, `\t`, `\r`).
-/// 2. Strip `//` and `/* */` comments (before trailing-comma removal,
-///    since comments can mask trailing commas).
-/// 3. Fix single quotes to double quotes (preserving apostrophes inside
-///    double-quoted strings).
-/// 4. Quote bare (unquoted) keys.
-/// 5. Remove trailing commas before `]` or `}`.
+/// `apply_stages` runs these steps in order. A later step sees the
+/// earlier rewrites.
+///
+/// 1. Strip control characters other than newline, tab, and carriage return.
+/// 2. Strip `//`, `#`, and closed `/* */` comments that begin at a token
+///    boundary. An unclosed `/*` stays. A mark glued to a bare word stays.
+/// 3. Replace single quotes with double quotes.
+/// 4. Replace curly double quotes that wrap a token.
+/// 5. Escape raw controls inside strings.
+/// 6. Strip a unary `+` before a number.
+/// 7. Strip `_` between digits in a number, not inside a name.
+/// 8. Replace hexadecimal numbers.
+/// 9. Replace binary and octal numbers.
+/// 10. Fill a trailing decimal dot on a number (`1.` becomes `1.0`).
+/// 11. Replace Python triple quotes.
+/// 12. Replace unicode whitespace between tokens.
+/// 13. Replace `=` and `=>` between a key and a value.
+/// 14. Insert a missing colon. A later word in a bare phrase is not a new key.
+/// 15. Quote bare keys.
+/// 16. Replace Python `True`, `False`, and `None`.
+/// 17. Quote one bare value word. A word cut off at end of input stays bare.
+/// 18. Insert missing commas.
+/// 19. Collapse repeated commas.
+/// 20. Drop a leading comma.
+/// 21. Remove trailing commas.
+/// 22. Remove one trailing semicolon.
+/// 23. Unwrap outer parentheses.
 pub(crate) struct Staged {
     pub text: String,
     pub repairs: Vec<Rewrite>,
@@ -675,7 +694,7 @@ pub(crate) fn insert_missing_colons(s: &str) -> String {
             let keyish = colon_keyish(&stack);
             out.extend(chars[index..end].iter().copied());
             index = end;
-            if keyish && colon_needed(&chars, index) {
+            if keyish && colon_needed(&chars, index) && !after_bare_phrase(&stack, &chars, index) {
                 out.push(':');
                 set_colon_mode(&mut stack, ColonMode::Value);
             } else if !keyish {
@@ -742,6 +761,19 @@ fn plain_integer_key(token: &str) -> bool {
         return false;
     }
     token == "0" || !token.starts_with('0')
+}
+
+/// In `After` mode the previous value was already finished. Another bare
+/// word is the rest of a phrase (`fix the bug`), not a key (`b` before `2`).
+fn after_bare_phrase(stack: &[ColonNest], chars: &[char], index: usize) -> bool {
+    if !matches!(stack.last(), Some(ColonNest::Object(ColonMode::After))) {
+        return false;
+    }
+    let mut next = index;
+    while next < chars.len() && chars[next].is_ascii_whitespace() {
+        next += 1;
+    }
+    next < chars.len() && starts_bare_word(chars[next])
 }
 
 fn colon_needed(chars: &[char], index: usize) -> bool {
@@ -1142,7 +1174,8 @@ pub(crate) fn fill_trailing_decimal_dot(s: &str) -> String {
         }
         let prev_digit = index > 0 && chars[index - 1].is_ascii_digit();
         let at_end = index + 1 == len || is_json_value_end(chars[index + 1]);
-        if chars[index] == '.' && prev_digit && at_end {
+        if chars[index] == '.' && prev_digit && at_end && digits_belong_to_number(&chars, index - 1)
+        {
             out.push('.');
             out.push('0');
             index += 1;
@@ -1285,6 +1318,134 @@ pub(crate) fn replace_binary_and_octal_numbers(s: &str) -> String {
     out
 }
 
+fn digits_belong_to_number(chars: &[char], digit_index: usize) -> bool {
+    numeric_token_before(chars, digit_index + 1)
+}
+
+fn underscore_in_number(chars: &[char], index: usize) -> bool {
+    if index == 0
+        || index + 1 >= chars.len()
+        || chars[index] != '_'
+        || !chars[index - 1].is_ascii_digit()
+        || !chars[index + 1].is_ascii_digit()
+    {
+        return false;
+    }
+    let mut end = index + 1;
+    while end < chars.len()
+        && (chars[end].is_ascii_alphanumeric() || matches!(chars[end], '_' | '.'))
+    {
+        end += 1;
+    }
+    numeric_token_before(chars, end)
+}
+
+/// The token that ends at `index` is a number, not a name. `1`, `1.`,
+/// `1e2`, and `0x1_0` count. `v1` and `abc.1` do not.
+fn numeric_token_before(chars: &[char], index: usize) -> bool {
+    if index == 0 {
+        return false;
+    }
+    let mut start = index;
+    while start > 0 {
+        let ch = chars[start - 1];
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.') {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+    if start > 0 && matches!(chars[start - 1], '+' | '-') {
+        let boundary =
+            start == 1 || !(chars[start - 2].is_ascii_alphanumeric() || chars[start - 2] == '_');
+        if boundary {
+            start -= 1;
+        }
+    }
+    start < index && is_numeric_token(&chars[start..index])
+}
+
+fn is_numeric_token(token: &[char]) -> bool {
+    let mut index = 0;
+    if matches!(token.first(), Some('+' | '-')) {
+        index = 1;
+    }
+    if index >= token.len() {
+        return false;
+    }
+    if token.len() - index >= 3
+        && token[index] == '0'
+        && matches!(token[index + 1], 'x' | 'X' | 'b' | 'B' | 'o' | 'O')
+    {
+        let rest = &token[index + 2..];
+        return rest.iter().any(|ch| ch.is_ascii_hexdigit())
+            && rest.iter().all(|ch| ch.is_ascii_hexdigit() || *ch == '_');
+    }
+    let mut saw_digit = false;
+    while index < token.len() && (token[index].is_ascii_digit() || token[index] == '_') {
+        saw_digit |= token[index].is_ascii_digit();
+        index += 1;
+    }
+    if index < token.len() && token[index] == '.' {
+        index += 1;
+        while index < token.len() && (token[index].is_ascii_digit() || token[index] == '_') {
+            saw_digit |= token[index].is_ascii_digit();
+            index += 1;
+        }
+    }
+    if !saw_digit {
+        return false;
+    }
+    if index < token.len() && matches!(token[index], 'e' | 'E') {
+        index += 1;
+        if index < token.len() && matches!(token[index], '+' | '-') {
+            index += 1;
+        }
+        let mut exponent_digit = false;
+        while index < token.len() && (token[index].is_ascii_digit() || token[index] == '_') {
+            exponent_digit |= token[index].is_ascii_digit();
+            index += 1;
+        }
+        if !exponent_digit {
+            return false;
+        }
+    }
+    index == token.len()
+}
+
+/// A comment starts at a token boundary. Whitespace, a bracket, a comma, a
+/// colon, a quote, a finished number, or a finished literal counts. A mark
+/// glued to a bare word (`a//b`, `x#y`) stays in that word.
+fn comment_can_start(chars: &[char], index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    let prev = chars[index - 1];
+    if prev.is_ascii_whitespace() || matches!(prev, '{' | '[' | ',' | ':' | '}' | ']' | '"' | '\'')
+    {
+        return true;
+    }
+    if (prev.is_ascii_digit() || prev == '.') && numeric_token_before(chars, index) {
+        return true;
+    }
+    finished_json_literal(chars, index)
+}
+
+fn finished_json_literal(chars: &[char], index: usize) -> bool {
+    let mut start = index;
+    while start > 0 && chars[start - 1].is_ascii_alphabetic() {
+        start -= 1;
+    }
+    if start == index {
+        return false;
+    }
+    let word: String = chars[start..index].iter().collect();
+    matches!(
+        word.as_str(),
+        "true" | "false" | "null" | "True" | "False" | "None" | "undefined" | "NaN" | "Infinity"
+    )
+}
+
 fn is_radix_digit(ch: char, radix: u32) -> bool {
     match radix {
         2 => ch == '0' || ch == '1',
@@ -1331,14 +1492,7 @@ pub(crate) fn strip_numeric_underscores(s: &str) -> String {
             }
             continue;
         }
-        if chars[i] == '_'
-            && out
-                .chars()
-                .next_back()
-                .is_some_and(|ch| ch.is_ascii_digit())
-            && i + 1 < len
-            && chars[i + 1].is_ascii_digit()
-        {
+        if underscore_in_number(&chars, i) {
             i += 1;
             continue;
         }
@@ -1556,7 +1710,7 @@ fn value_boundary(chars: &[char], index: usize) -> bool {
     while next < chars.len() && chars[next].is_ascii_whitespace() {
         next += 1;
     }
-    next >= chars.len() || matches!(chars[next], ',' | '}' | ']' | '{' | '[' | '"')
+    next < chars.len() && matches!(chars[next], ',' | '}' | ']' | '{' | '[' | '"')
 }
 
 fn reserved_bare_word(word: &str) -> bool {
@@ -1986,20 +2140,20 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                     i += 1;
                 }
             }
-            '#' => {
+            '#' if comment_can_start(&chars, i) => {
                 i += 1;
                 while i < len && chars[i] != '\n' {
                     i += 1;
                 }
             }
             '/' if i + 1 < len => {
-                if chars[i + 1] == '/' {
+                if chars[i + 1] == '/' && comment_can_start(&chars, i) {
                     // Line comment: skip until newline.
                     i += 2;
                     while i < len && chars[i] != '\n' {
                         i += 1;
                     }
-                } else if chars[i + 1] == '*' {
+                } else if chars[i + 1] == '*' && comment_can_start(&chars, i) {
                     // A closed block comment is removed. An unclosed one is
                     // kept: dropping the tail and then inventing `}` would
                     // change the object.
@@ -2239,6 +2393,105 @@ mod tests {
                 );
             }
             other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invented_tokens_stay_unfixable() {
+        assert!(matches!(
+            repair_tool_call_json("{message: fix the bug}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{\"force\": tru"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{\"path\":\"a.rs\",\"mode\": overwr"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("[\"a\", b"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{path: a//b, force: true}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{\"a\":1,\"b\":x#y,\"c\":2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{\"id\": abc1., \"x\": 1,}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{\"line\": 12"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{v1_2: 1,}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["v1_2"], 1),
+            other => panic!("name underscore {other:?}"),
+        }
+        match repair_tool_call_json("{\"id\": abc1_2,}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["id"], "abc1_2"),
+            other => panic!("value underscore {other:?}"),
+        }
+        match repair_tool_call_json("{n: 1.}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["n"], 1.0),
+            other => panic!("trailing dot {other:?}"),
+        }
+        match repair_tool_call_json("{\"a\":1} // note") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("line comment {other:?}"),
+        }
+        match repair_tool_call_json("{a: 1} # note") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("hash comment {other:?}"),
+        }
+        match repair_tool_call_json("{\"n\":1//keep\n,\"b\":2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["n"], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("comment after number {other:?}"),
+        }
+        match repair_tool_call_json("{flag: true//keep\n}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["flag"], true),
+            other => panic!("comment after literal {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{id: v1//b\n, c: 2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{id: v1/*rev*/2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{id: x1#y\n, c: 2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{\"n\":1.//keep\n}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["n"], 1.0),
+            other => panic!("dot comment {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{\"id\": abc.1., \"x\": 1,}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{n: 0x1_0}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["n"], 16),
+            other => panic!("hex underscore {other:?}"),
+        }
+        match repair_tool_call_json("{n: 0b1_0}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["n"], 2),
+            other => panic!("binary underscore {other:?}"),
+        }
+        match repair_tool_call_json("{n: 1e2_0}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["n"].as_f64(), Some(1e20)),
+            other => panic!("exponent underscore {other:?}"),
         }
     }
 

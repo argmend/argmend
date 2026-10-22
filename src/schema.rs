@@ -3,6 +3,8 @@
 //! Valid JSON is not rewritten unless the schema asks for a rename, a
 //! string coercion, or the drop of one unknown key.
 
+use std::cmp::Ordering;
+
 use serde_json::{Map, Value};
 
 use crate::{RepairError, Repaired, Rewrite, RewriteKind};
@@ -84,13 +86,13 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
 
 fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
     if let Some((next, rewrites)) = if_then_else(value, schema) {
-        return Ok((next, rewrites));
+        return enforce_outer_object(value, next, schema, rewrites);
     }
     if let Some((next, rewrites)) = all_of(value, schema) {
-        return Ok((next, rewrites));
+        return enforce_outer_object(value, next, schema, rewrites);
     }
     if let Some((next, rewrites)) = exclusive_branch(value, schema) {
-        return Ok((next, rewrites));
+        return enforce_outer_object(value, next, schema, rewrites);
     }
     if let Some((next, rewrites)) = deep_constrained(value, schema) {
         return Ok((next, rewrites));
@@ -404,11 +406,161 @@ fn pow10(exp: i32) -> Option<u128> {
     Some(factor)
 }
 
+fn enforce_outer_object(
+    original: &Value,
+    next: Value,
+    schema: &Value,
+    mut rewrites: Vec<Rewrite>,
+) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if let Some(message) = outer_property_rejected(original, &next, schema) {
+        return Err(RepairError::Ambiguous(message.to_string()));
+    }
+    let Some(obj) = next.as_object() else {
+        return Ok((next, rewrites));
+    };
+    let props = object_properties(schema);
+    if props.is_none() && !denies_unknown(schema) && additional_properties_schema(schema).is_none()
+    {
+        return Ok((next, rewrites));
+    }
+    let empty = Map::new();
+    let (normalized, more) = normalize_object(obj, schema, props.unwrap_or(&empty))?;
+    rewrites.extend(more);
+    Ok((normalized, rewrites))
+}
+
+fn outer_property_rejected(
+    original: &Value,
+    produced: &Value,
+    schema: &Value,
+) -> Option<&'static str> {
+    let props = object_properties(schema)?;
+    let produced_obj = produced.as_object()?;
+    let original_obj = original.as_object()?;
+    for (key, prop_schema) in props {
+        let Some(next) = produced_obj.get(key) else {
+            continue;
+        };
+        let Some(prev) = original_obj.get(key) else {
+            continue;
+        };
+        if prev == next {
+            continue;
+        }
+        if violates_bounds(prop_schema, next) {
+            return Some("coerced value is outside the schema bounds");
+        }
+        if prev.is_string()
+            && !next.is_string()
+            && schema_type_names(prop_schema).contains(&"string")
+        {
+            return Some("coerced value does not match the outer schema");
+        }
+    }
+    None
+}
+
 fn violates_bounds(schema: &Value, value: &Value) -> bool {
+    // An i64 past 2^53 is not an exact f64, so the float path would skip
+    // the bound. Compare it with each bound as an integer when the bound's
+    // integer part is exact, including a fraction such as 10.5.
+    if let Some(int) = value.as_i64()
+        && let Some(outside) = i64_against_schema_bounds(schema, int)
+    {
+        return outside;
+    }
     let Some(number) = finite_bound(value) else {
         return false;
     };
     below_minimum(schema, number) || above_maximum(schema, number)
+}
+
+fn i64_against_schema_bounds(schema: &Value, int: i64) -> Option<bool> {
+    for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+        let Some(bound) = schema.get(key) else {
+            continue;
+        };
+        if bound.is_boolean() {
+            continue;
+        }
+        if schema_i64_limit(schema, key).is_none() && comparable_f64_bound(bound).is_none() {
+            return None;
+        }
+    }
+    Some(i64_outside_bounds(schema, int))
+}
+
+fn comparable_f64_bound(bound: &Value) -> Option<f64> {
+    let number = bound.as_f64()?;
+    if !number.is_finite() || number.trunc().abs() > (1i64 << 53) as f64 {
+        return None;
+    }
+    Some(number)
+}
+
+fn i64_outside_bounds(schema: &Value, int: i64) -> bool {
+    if bound_fails(schema, int, "exclusiveMinimum", true, true) {
+        return true;
+    }
+    let minimum_exclusive = matches!(schema.get("exclusiveMinimum"), Some(Value::Bool(true)));
+    if bound_fails(schema, int, "minimum", minimum_exclusive, true) {
+        return true;
+    }
+    if bound_fails(schema, int, "exclusiveMaximum", true, false) {
+        return true;
+    }
+    let maximum_exclusive = matches!(schema.get("exclusiveMaximum"), Some(Value::Bool(true)));
+    bound_fails(schema, int, "maximum", maximum_exclusive, false)
+}
+
+fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) -> bool {
+    let Some(bound) = schema.get(key) else {
+        return false;
+    };
+    if bound.is_boolean() {
+        return false;
+    }
+    let order = if let Some(limit) = schema_i64_limit(schema, key) {
+        int.cmp(&limit)
+    } else if let Some(limit) = comparable_f64_bound(bound) {
+        cmp_i64_f64(int, limit)
+    } else {
+        return false;
+    };
+    if low {
+        if exclusive {
+            order.is_le()
+        } else {
+            order.is_lt()
+        }
+    } else if exclusive {
+        order.is_ge()
+    } else {
+        order.is_gt()
+    }
+}
+
+fn cmp_i64_f64(int: i64, limit: f64) -> Ordering {
+    let trunc = limit.trunc() as i64;
+    match int.cmp(&trunc) {
+        Ordering::Equal if limit == limit.trunc() => Ordering::Equal,
+        Ordering::Equal if limit > trunc as f64 => Ordering::Less,
+        Ordering::Equal => Ordering::Greater,
+        other => other,
+    }
+}
+
+fn schema_i64_limit(schema: &Value, key: &str) -> Option<i64> {
+    let value = schema.get(key)?;
+    if let Some(int) = value.as_i64() {
+        return Some(int);
+    }
+    let number = value.as_f64()?;
+    if number.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(&number) {
+        Some(number as i64)
+    } else {
+        None
+    }
 }
 
 fn below_minimum(schema: &Value, number: f64) -> bool {
@@ -1424,9 +1576,22 @@ fn number_matches(text: &str, target: &serde_json::Number) -> bool {
     number_string(text).is_some_and(|number| numbers_equal(&number, target))
 }
 
+fn integer_does_not_fit_f64(number: &serde_json::Number) -> bool {
+    if let Some(int) = number.as_i64() {
+        return int as f64 as i64 != int;
+    }
+    if let Some(int) = number.as_u64() {
+        return int as f64 as u64 != int;
+    }
+    false
+}
+
 fn numbers_equal(left: &serde_json::Number, right: &serde_json::Number) -> bool {
     if left == right {
         return true;
+    }
+    if integer_does_not_fit_f64(left) || integer_does_not_fit_f64(right) {
+        return false;
     }
     match (left.as_f64(), right.as_f64()) {
         (Some(lhs), Some(rhs)) => {
