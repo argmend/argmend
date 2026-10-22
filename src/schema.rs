@@ -236,7 +236,7 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
         }
     }
     if types.contains(&"integer")
-        && let Some(number) = integer_string(text)
+        && let Some(number) = integer_string(text).or_else(|| integer_from_zero_fraction(text))
     {
         rewrites.push(rewrite(
             RewriteKind::NumberString,
@@ -263,6 +263,32 @@ fn integer_string(text: &str) -> Option<serde_json::Number> {
         return None;
     }
     let parsed = text.parse::<i64>().ok()?;
+    Some(serde_json::Number::from(parsed))
+}
+
+/// `"3.0"` and `"-2.000"` are integers. `"3.10"` and `"03.0"` are not.
+fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
+    let text = without_digit_underscores(text)?;
+    let text = text.strip_prefix('+').unwrap_or(&text);
+    let (negative, rest) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, frac) = rest.split_once('.')?;
+    if whole.is_empty()
+        || frac.is_empty()
+        || !frac.bytes().all(|byte| byte == b'0')
+        || !is_integer_token(whole)
+        || has_leading_zero(whole)
+    {
+        return None;
+    }
+    let mut digits = String::with_capacity(whole.len() + 1);
+    if negative && whole.bytes().any(|byte| byte != b'0') {
+        digits.push('-');
+    }
+    digits.push_str(whole);
+    let parsed = digits.parse::<i64>().ok()?;
     Some(serde_json::Number::from(parsed))
 }
 

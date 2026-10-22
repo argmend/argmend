@@ -1133,6 +1133,40 @@ mod tests {
     }
 
     #[test]
+    fn zero_fraction_integer_string_is_coerced() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer"},
+                "s": {"type": ["integer", "string"]}
+            }
+        });
+        let repaired = normalize(&json!({"n": "3.0", "s": "4.0"}), &schema).expect("fraction");
+        assert_eq!(repaired.value["n"], 3);
+        assert_eq!(repaired.value["s"], "4.0");
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail == "integer string 3.0")
+        );
+        let repaired = normalize(&json!({"n": "-2.000"}), &schema).expect("negative");
+        assert_eq!(repaired.value["n"], -2);
+        let repaired = normalize(&json!({"n": "+3.0"}), &schema).expect("plus");
+        assert_eq!(repaired.value["n"], 3);
+        let repaired = normalize(&json!({"n": " 0.0\n"}), &schema).expect("zero");
+        assert_eq!(repaired.value["n"], 0);
+        let repaired = normalize(&json!({"n": "1_000.00"}), &schema).expect("underscores");
+        assert_eq!(repaired.value["n"], 1000);
+        let repaired = normalize(&json!({"n": "3.10"}), &schema).expect("keep fraction");
+        assert_eq!(repaired.value["n"], "3.10");
+        let repaired = normalize(&json!({"n": "03.0"}), &schema).expect("keep leading zero");
+        assert_eq!(repaired.value["n"], "03.0");
+        let repaired = normalize(&json!({"n": "1e2"}), &schema).expect("keep scientific");
+        assert_eq!(repaired.value["n"], "1e2");
+    }
+
+    #[test]
     fn unary_plus_before_a_number_is_stripped() {
         match repair_json("{a: +1, b: + 1.5, c: -2}") {
             RepairOutcome::Repaired { value, .. } => {
