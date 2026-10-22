@@ -1294,6 +1294,43 @@ mod tests {
     }
 
     #[test]
+    fn all_of_applies_every_branch_when_they_agree() {
+        let schema = json!({
+            "allOf": [{"type": "integer"}, {"enum": [1, 2]}]
+        });
+        let repaired = normalize(&json!("1"), &schema).expect("agree");
+        assert_eq!(repaired.value, 1);
+
+        let conflict = json!({
+            "allOf": [{"type": "integer"}, {"type": "boolean"}]
+        });
+        let kept = normalize(&json!("1"), &conflict).expect("conflict");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let text = json!({
+            "allOf": [{"type": "string"}, {"type": "integer"}]
+        });
+        let kept = normalize(&json!("1"), &text).expect("string and integer");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let fields = json!({
+            "allOf": [
+                {"type": "object", "properties": {"n": {"type": "integer"}}},
+                {"type": "object", "properties": {"flag": {"type": "boolean"}}}
+            ]
+        });
+        let repaired = normalize(&json!({"n": "1", "flag": "true"}), &fields).expect("fields");
+        assert_eq!(repaired.value["n"], 1);
+        assert_eq!(repaired.value["flag"], true);
+
+        let already = normalize(&json!(1), &schema).expect("already");
+        assert_eq!(already.value, 1);
+        assert!(already.rewrites.is_empty());
+    }
+
+    #[test]
     fn one_of_coerces_when_only_one_branch_accepts() {
         let schema = json!({
             "oneOf": [{"type": "integer"}, {"type": "boolean"}]

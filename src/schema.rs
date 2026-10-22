@@ -18,6 +18,9 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 }
 
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if let Some((next, rewrites)) = all_of(value, schema) {
+        return Ok((next, rewrites));
+    }
     if let Some((next, rewrites)) = exclusive_branch(value, schema) {
         return Ok((next, rewrites));
     }
@@ -55,16 +58,50 @@ enum ArrayTail<'a> {
     Schema(&'a Value),
 }
 
+/// Apply every `allOf` branch. The result must still satisfy each branch.
+fn all_of(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
+    let branches = single_applicator(schema, "allOf")?;
+    if branches.is_empty() {
+        return None;
+    }
+    let mut current = value.clone();
+    let mut rewrites = Vec::new();
+    for branch in branches {
+        let (next, more) = normalize_child(&current, branch).ok()?;
+        if !constraints_hold(branch, &next) {
+            return None;
+        }
+        current = next;
+        rewrites.extend(more);
+    }
+    for branch in branches {
+        let (next, _) = normalize_child(&current, branch).ok()?;
+        if next != current || !constraints_hold(branch, &next) {
+            return None;
+        }
+    }
+    if current == *value && rewrites.is_empty() {
+        return None;
+    }
+    Some((current, rewrites))
+}
+
+fn single_applicator<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
+    let present = ["allOf", "oneOf", "anyOf"]
+        .into_iter()
+        .filter(|name| schema.get(*name).is_some())
+        .count();
+    if present != 1 {
+        return None;
+    }
+    schema.get(key).and_then(Value::as_array)
+}
+
 /// `oneOf` and `anyOf` coerce only when one branch accepts the value.
 /// Two accepting branches are left unchanged.
 fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
-    if schema.get("oneOf").is_some() && schema.get("anyOf").is_some() {
-        return None;
-    }
-    let branches = schema
-        .get("oneOf")
-        .or_else(|| schema.get("anyOf"))
-        .and_then(Value::as_array)?;
+    let branches =
+        single_applicator(schema, "oneOf").or_else(|| single_applicator(schema, "anyOf"))?;
     let mut matched = Vec::new();
     for branch in branches {
         let (next, rewrites) = normalize_child(value, branch).ok()?;
