@@ -1310,6 +1310,33 @@ mod tests {
     }
 
     #[test]
+    fn array_items_apply_without_a_type_keyword() {
+        let schema = json!({"items": {"type": "integer"}});
+        let repaired = normalize(&json!(["1", "2"]), &schema).expect("items");
+        assert_eq!(repaired.value[0], 1);
+        assert_eq!(repaired.value[1], 2);
+        let repaired = normalize(&json!({"a": "1"}), &schema).expect("object");
+        assert_eq!(repaired.value["a"], "1");
+
+        let tuple = json!({"items": [{"type": "integer"}, {"type": "boolean"}]});
+        let repaired = normalize(&json!(["3", "false"]), &tuple).expect("tuple");
+        assert_eq!(repaired.value[0], 3);
+        assert_eq!(repaired.value[1], false);
+
+        let prefix = json!({
+            "prefixItems": [{"type": "integer"}],
+            "items": {"type": "boolean"}
+        });
+        let repaired = normalize(&json!(["4", "true"]), &prefix).expect("prefix");
+        assert_eq!(repaired.value[0], 4);
+        assert_eq!(repaired.value[1], true);
+
+        let object = json!({"type": "object", "items": {"type": "integer"}});
+        let repaired = normalize(&json!(["1"]), &object).expect("keep");
+        assert_eq!(repaired.value[0], "1");
+    }
+
+    #[test]
     fn empty_fraction_string_is_an_integer() {
         let schema = json!({
             "type": "object",
