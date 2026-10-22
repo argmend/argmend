@@ -1337,6 +1337,47 @@ mod tests {
     }
 
     #[test]
+    fn applicator_honors_a_constraint_on_every_branch() {
+        let bounds = json!({
+            "allOf": [{"type": "integer"}, {"minimum": 0}]
+        });
+        let kept = normalize(&json!("-1"), &bounds).expect("below");
+        assert_eq!(kept.value, "-1");
+        assert!(kept.rewrites.is_empty());
+        let repaired = normalize(&json!("1"), &bounds).expect("inside");
+        assert_eq!(repaired.value, 1);
+
+        let excluded = json!({
+            "allOf": [{"type": "integer"}, {"not": {"const": 1}}]
+        });
+        let kept = normalize(&json!("1"), &excluded).expect("excluded");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+        let repaired = normalize(&json!("2"), &excluded).expect("other");
+        assert_eq!(repaired.value, 2);
+
+        let sides = json!({
+            "oneOf": [
+                {"type": "integer", "minimum": 0},
+                {"type": "integer", "maximum": -1}
+            ]
+        });
+        let repaired = normalize(&json!("1"), &sides).expect("positive");
+        assert_eq!(repaired.value, 1);
+        let repaired = normalize(&json!("-5"), &sides).expect("negative");
+        assert_eq!(repaired.value, -5);
+
+        let branch = json!({
+            "if": {"type": "integer", "minimum": 0},
+            "else": {"type": "integer", "maximum": -1}
+        });
+        let repaired = normalize(&json!("4"), &branch).expect("if");
+        assert_eq!(repaired.value, 4);
+        let repaired = normalize(&json!("-2"), &branch).expect("else");
+        assert_eq!(repaired.value, -2);
+    }
+
+    #[test]
     fn unique_items_rejects_a_coercion_that_makes_duplicates() {
         let schema = json!({
             "type": "array",
