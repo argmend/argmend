@@ -438,6 +438,39 @@ mod tests {
     }
 
     #[test]
+    fn type_union_coerces_when_string_is_absent() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "force": {"type": ["boolean", "null"]},
+                "line": {"type": ["integer", "null"]},
+                "ratio": {"type": ["number", "null"]}
+            }
+        });
+        let repaired = normalize(
+            &json!({"force": "false", "line": "4", "ratio": "1.5"}),
+            &schema,
+        )
+        .expect("union");
+        assert_eq!(repaired.value["force"], false);
+        assert_eq!(repaired.value["line"], 4);
+        assert_eq!(repaired.value["ratio"], 1.5);
+    }
+
+    #[test]
+    fn type_union_with_string_keeps_the_text() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "force": {"type": ["string", "boolean"]}
+            }
+        });
+        let repaired = normalize(&json!({"force": "true"}), &schema).expect("keep");
+        assert_eq!(repaired.value["force"], "true");
+        assert!(repaired.rewrites.is_empty());
+    }
+
+    #[test]
     fn two_unknown_keys_are_refused() {
         let schema = json!({
             "type": "object",

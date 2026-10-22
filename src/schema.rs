@@ -182,53 +182,58 @@ fn required_present(schema: &Value, out: &Map<String, Value>) -> bool {
         .all(|name| out.contains_key(name))
 }
 
+fn schema_type_names(schema: &Value) -> Vec<&str> {
+    match schema.get("type") {
+        Some(Value::String(text)) => vec![text.as_str()],
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
     let Some(text) = value.as_str() else {
         return value.clone();
     };
-    let Some(ty) = schema.get("type").and_then(Value::as_str) else {
+    let types = schema_type_names(schema);
+    // A union that includes string can keep the text. Coercing it would guess.
+    if types.is_empty() || types.contains(&"string") {
         return value.clone();
-    };
-    match ty {
-        "boolean" => {
-            if text.eq_ignore_ascii_case("true") {
-                rewrites.push(rewrite(
-                    RewriteKind::BoolString,
-                    "boolean string true".into(),
-                ));
-                Value::Bool(true)
-            } else if text.eq_ignore_ascii_case("false") {
-                rewrites.push(rewrite(
-                    RewriteKind::BoolString,
-                    "boolean string false".into(),
-                ));
-                Value::Bool(false)
-            } else {
-                value.clone()
-            }
-        }
-        "integer" => integer_string(text).map_or_else(
-            || value.clone(),
-            |number| {
-                rewrites.push(rewrite(
-                    RewriteKind::NumberString,
-                    format!("integer string {text}"),
-                ));
-                Value::Number(number)
-            },
-        ),
-        "number" => number_string(text).map_or_else(
-            || value.clone(),
-            |number| {
-                rewrites.push(rewrite(
-                    RewriteKind::NumberString,
-                    format!("number string {text}"),
-                ));
-                Value::Number(number)
-            },
-        ),
-        _ => value.clone(),
     }
+    if types.contains(&"boolean") {
+        if text.eq_ignore_ascii_case("true") {
+            rewrites.push(rewrite(
+                RewriteKind::BoolString,
+                "boolean string true".into(),
+            ));
+            return Value::Bool(true);
+        }
+        if text.eq_ignore_ascii_case("false") {
+            rewrites.push(rewrite(
+                RewriteKind::BoolString,
+                "boolean string false".into(),
+            ));
+            return Value::Bool(false);
+        }
+    }
+    if types.contains(&"integer")
+        && let Some(number) = integer_string(text)
+    {
+        rewrites.push(rewrite(
+            RewriteKind::NumberString,
+            format!("integer string {text}"),
+        ));
+        return Value::Number(number);
+    }
+    if types.contains(&"number")
+        && let Some(number) = number_string(text)
+    {
+        rewrites.push(rewrite(
+            RewriteKind::NumberString,
+            format!("number string {text}"),
+        ));
+        return Value::Number(number);
+    }
+    value.clone()
 }
 
 fn integer_string(text: &str) -> Option<serde_json::Number> {
