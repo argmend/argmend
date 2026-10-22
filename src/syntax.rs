@@ -138,6 +138,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = strip_leading_object_commas(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("removed a leading comma"));
+        text = cleaned;
+    }
+
     let cleaned = remove_trailing_commas(&text);
     if cleaned != text {
         repairs.push(syntax_note("removed trailing commas"));
@@ -1668,6 +1674,46 @@ pub(crate) fn collapse_repeated_object_commas(s: &str) -> String {
     out
 }
 
+/// Drop a comma that sits immediately after `{`. `[ ,1]` is left alone:
+/// an empty array slot could be missing or null.
+pub(crate) fn strip_leading_object_commas(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut index = 0;
+    let mut stack: Vec<bool> = Vec::new();
+    while index < len {
+        let ch = chars[index];
+        if ch == '"' {
+            index = copy_quoted(&chars, index, &mut out);
+            continue;
+        }
+        if ch == '{' || ch == '[' {
+            out.push(ch);
+            stack.push(ch == '{');
+            index += 1;
+            continue;
+        }
+        if ch == '}' || ch == ']' {
+            out.push(ch);
+            stack.pop();
+            index += 1;
+            continue;
+        }
+        if ch == ',' && stack.last() == Some(&true) && last_non_ws_out(&out) == Some('{') {
+            index += 1;
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+fn last_non_ws_out(out: &str) -> Option<char> {
+    out.chars().rev().find(|ch| !ch.is_ascii_whitespace())
+}
+
 /// Remove trailing commas before `]` or `}`.
 pub(crate) fn remove_trailing_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -2012,6 +2058,55 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn leading_object_commas_are_removed() {
+        match repair_tool_call_json(r#"{,"a":1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("leading"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{, "a": 1,}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{,,"b":2}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["b"], 2),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{"a":{,"b":1}}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"]["b"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{,}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, serde_json::json!({}));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("[,1]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("[1,,2]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1,"b":2}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":","}"#),
+            RepairOutcome::Valid(_)
+        ));
     }
 
     #[test]
