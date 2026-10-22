@@ -95,6 +95,12 @@ fn normalize_object(
     }
 
     if denies_unknown(schema) {
+        if !unknown.is_empty() && has_pattern_properties(schema) {
+            let key = &unknown[0].0;
+            return Err(RepairError::Ambiguous(format!(
+                "unknown key '{key}' may be allowed by patternProperties"
+            )));
+        }
         if unknown.len() > 1 {
             return Err(RepairError::Ambiguous(format!(
                 "{} unknown keys and additionalProperties is false",
@@ -156,6 +162,16 @@ fn object_properties(schema: &Value) -> Option<&Map<String, Value>> {
         schema
     };
     schema.get("properties")?.as_object()
+}
+
+fn has_pattern_properties(schema: &Value) -> bool {
+    fn nonempty(value: &Value) -> bool {
+        value
+            .get("patternProperties")
+            .and_then(Value::as_object)
+            .is_some_and(|patterns| !patterns.is_empty())
+    }
+    nonempty(schema) || schema.get("parameters").is_some_and(nonempty)
 }
 
 fn denies_unknown(schema: &Value) -> bool {
