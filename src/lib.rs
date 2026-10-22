@@ -579,6 +579,29 @@ mod tests {
     }
 
     #[test]
+    fn closed_object_schema_with_no_properties_rejects_keys() {
+        let schema = json!({"type": "object", "additionalProperties": false});
+        let err = normalize(&json!({"a": 1}), &schema).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let err = normalize(&json!({"a": 1, "b": 2}), &schema).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!({}), &schema).expect("empty");
+        assert_eq!(repaired.value, json!({}));
+        assert!(repaired.rewrites.is_empty());
+
+        let nested = json!({
+            "type": "object",
+            "properties": {
+                "child": {"type": "object", "additionalProperties": false}
+            }
+        });
+        let err = normalize(&json!({"child": {"x": 1}}), &nested).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!({"child": {}}), &nested).expect("empty child");
+        assert_eq!(repaired.value["child"], json!({}));
+    }
+
+    #[test]
     fn single_quoted_url_is_not_cut_at_the_slashes() {
         match repair_json("{'url': 'http://example.com/a'}") {
             RepairOutcome::Repaired { value, .. } => {
