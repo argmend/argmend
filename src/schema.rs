@@ -32,19 +32,78 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
             return Ok((next, rewrites));
         }
     }
-    if schema.get("type").and_then(Value::as_str) == Some("array")
-        && let Some(items) = schema.get("items")
+    if schema_type_names(schema).contains(&"array")
         && let Some(arr) = coerced.as_array()
     {
+        let (next, more) = normalize_array(arr, schema)?;
+        rewrites.extend(more);
+        return Ok((next, rewrites));
+    }
+    Ok((coerced, rewrites))
+}
+
+#[derive(Clone, Copy)]
+enum ArrayTail<'a> {
+    Keep,
+    Forbid,
+    Schema(&'a Value),
+}
+
+fn tuple_positions(schema: &Value) -> Option<(&Vec<Value>, ArrayTail<'_>)> {
+    if let Some(Value::Array(prefix)) = schema.get("prefixItems") {
+        let tail = match schema.get("items") {
+            Some(Value::Bool(false)) => ArrayTail::Forbid,
+            Some(rest) if rest.is_object() => ArrayTail::Schema(rest),
+            _ => ArrayTail::Keep,
+        };
+        return Some((prefix, tail));
+    }
+    if let Some(Value::Array(items)) = schema.get("items") {
+        let tail = match schema.get("additionalItems") {
+            Some(Value::Bool(false)) => ArrayTail::Forbid,
+            Some(rest) if rest.is_object() => ArrayTail::Schema(rest),
+            _ => ArrayTail::Keep,
+        };
+        return Some((items, tail));
+    }
+    None
+}
+
+fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if let Some((positions, tail)) = tuple_positions(schema) {
+        if matches!(tail, ArrayTail::Forbid) && arr.len() > positions.len() {
+            return Err(RepairError::Ambiguous(
+                "array item is past the tuple schema".into(),
+            ));
+        }
         let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
-            let (next, more) = normalize_child(item, items)?;
-            rewrites.extend(more);
-            out.push(next);
+        let mut rewrites = Vec::new();
+        for (index, item) in arr.iter().enumerate() {
+            if let Some(position) = positions.get(index) {
+                let (next, more) = normalize_child(item, position)?;
+                rewrites.extend(more);
+                out.push(next);
+            } else if let ArrayTail::Schema(rest) = tail {
+                let (next, more) = normalize_child(item, rest)?;
+                rewrites.extend(more);
+                out.push(next);
+            } else {
+                out.push(item.clone());
+            }
         }
         return Ok((Value::Array(out), rewrites));
     }
-    Ok((coerced, rewrites))
+    let Some(items) = schema.get("items").filter(|items| items.is_object()) else {
+        return Ok((Value::Array(arr.to_vec()), Vec::new()));
+    };
+    let mut out = Vec::with_capacity(arr.len());
+    let mut rewrites = Vec::new();
+    for item in arr {
+        let (next, more) = normalize_child(item, items)?;
+        rewrites.extend(more);
+        out.push(next);
+    }
+    Ok((Value::Array(out), rewrites))
 }
 
 fn normalize_object(
