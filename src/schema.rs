@@ -30,6 +30,11 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value is outside the schema bounds".into(),
             ));
         }
+        if violates_multiple(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value is not a multiple of the schema".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -263,6 +268,20 @@ fn violates_not(schema: &Value, value: &Value) -> bool {
 /// Inclusive `minimum` / `maximum`, numeric exclusive bounds, and the
 /// draft-04 boolean form of `exclusiveMinimum` / `exclusiveMaximum`.
 /// A bound that is not an exact finite number is ignored.
+/// A positive integer `multipleOf`. Zero and non-integers are not checked.
+fn violates_multiple(schema: &Value, value: &Value) -> bool {
+    let Some(multiple) = schema.get("multipleOf").and_then(Value::as_i64) else {
+        return false;
+    };
+    if multiple <= 0 {
+        return false;
+    }
+    let Some(number) = value.as_i64() else {
+        return false;
+    };
+    number % multiple != 0
+}
+
 fn violates_bounds(schema: &Value, value: &Value) -> bool {
     let Some(number) = finite_bound(value) else {
         return false;
