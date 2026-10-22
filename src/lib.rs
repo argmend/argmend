@@ -1492,6 +1492,48 @@ mod tests {
     }
 
     #[test]
+    fn unevaluated_items_false_rejects_an_extra_element() {
+        let prefix = json!({
+            "prefixItems": [{"type": "integer"}],
+            "unevaluatedItems": false
+        });
+        let err = normalize(&json!(["1", 2]), &prefix).expect_err("extra");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!(["1"]), &prefix).expect("one");
+        assert_eq!(repaired.value, json!([1]));
+
+        let tuple = json!({
+            "items": [{"type": "integer"}],
+            "unevaluatedItems": false
+        });
+        let err = normalize(&json!(["1", "no"]), &tuple).expect_err("tuple extra");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let every = json!({
+            "items": {"type": "integer"},
+            "unevaluatedItems": false
+        });
+        let repaired = normalize(&json!(["1", "2"]), &every).expect("items evaluates all");
+        assert_eq!(repaired.value, json!([1, 2]));
+
+        let closed = json!({"items": false});
+        let err = normalize(&json!([1]), &closed).expect_err("items false");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!([]), &closed).expect("empty");
+        assert_eq!(repaired.value, json!([]));
+        assert!(repaired.rewrites.is_empty());
+
+        let bare = json!({"unevaluatedItems": false});
+        let err = normalize(&json!([1]), &bare).expect_err("bare");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!([]), &bare).expect("bare empty");
+        assert_eq!(repaired.value, json!([]));
+
+        let already = normalize(&json!([1, 2]), &prefix).expect_err("already extra");
+        assert!(matches!(already, RepairError::Ambiguous(_)), "{already:?}");
+    }
+
+    #[test]
     fn size_limits_reject_a_coercion_past_the_bound() {
         let props = json!({
             "properties": {

@@ -786,6 +786,7 @@ fn tuple_positions(schema: &Value) -> Option<(&Vec<Value>, ArrayTail<'_>)> {
 
 fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
     if let Some((positions, tail)) = tuple_positions(schema) {
+        let tail = forbid_unevaluated_items(schema, tail);
         if matches!(tail, ArrayTail::Forbid) && arr.len() > positions.len() {
             return Err(RepairError::Ambiguous(
                 "array item is past the tuple schema".into(),
@@ -807,6 +808,14 @@ fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>
             }
         }
         return Ok((Value::Array(out), rewrites));
+    }
+    if forbids_every_item(schema) {
+        if arr.is_empty() {
+            return Ok((Value::Array(Vec::new()), Vec::new()));
+        }
+        return Err(RepairError::Ambiguous(
+            "array item is not allowed by the schema".into(),
+        ));
     }
     let Some(items) = schema.get("items").filter(|items| items.is_object()) else {
         return Ok((Value::Array(arr.to_vec()), Vec::new()));
@@ -1026,8 +1035,8 @@ fn required_present(schema: &Value, out: &Map<String, Value>) -> bool {
         .all(|name| out.contains_key(name))
 }
 
-/// An array value uses `items` or `prefixItems` even when `type` is omitted.
-/// An explicit non-array type does not.
+/// An array value uses `items`, `prefixItems`, or `unevaluatedItems` even
+/// when `type` is omitted. An explicit non-array type does not.
 fn describes_array(schema: &Value) -> bool {
     let types = schema_type_names(schema);
     if types.contains(&"array") {
@@ -1036,7 +1045,33 @@ fn describes_array(schema: &Value) -> bool {
     if !types.is_empty() {
         return false;
     }
-    schema.get("items").is_some() || schema.get("prefixItems").is_some()
+    schema.get("items").is_some()
+        || schema.get("prefixItems").is_some()
+        || schema.get("unevaluatedItems").is_some()
+}
+
+/// `unevaluatedItems: false` closes a tuple whose tail is still open.
+/// An `items` or `additionalItems` schema already evaluated that tail.
+fn forbid_unevaluated_items<'a>(schema: &'a Value, tail: ArrayTail<'a>) -> ArrayTail<'a> {
+    if matches!(tail, ArrayTail::Keep)
+        && schema.get("unevaluatedItems") == Some(&Value::Bool(false))
+    {
+        ArrayTail::Forbid
+    } else {
+        tail
+    }
+}
+
+/// `items: false` allows no element. `unevaluatedItems: false` with no
+/// item keyword does the same, because nothing evaluated an element.
+fn forbids_every_item(schema: &Value) -> bool {
+    if schema.get("prefixItems").is_some() {
+        return false;
+    }
+    if schema.get("items") == Some(&Value::Bool(false)) {
+        return true;
+    }
+    schema.get("items").is_none() && schema.get("unevaluatedItems") == Some(&Value::Bool(false))
 }
 
 fn schema_type_names(schema: &Value) -> Vec<&str> {
