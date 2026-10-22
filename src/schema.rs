@@ -210,6 +210,10 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
     let Some(text) = value.as_str() else {
         return value.clone();
     };
+    let text = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    if text.is_empty() {
+        return value.clone();
+    }
     let types = schema_type_names(schema);
     // A union that includes string can keep the text. Coercing it would guess.
     if types.is_empty() || types.contains(&"string") {

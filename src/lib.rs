@@ -511,6 +511,23 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_around_a_typed_string_is_trimmed() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "n": {"type": "integer"}
+            }
+        });
+        let repaired = normalize(&json!({"ok": " true ", "n": " 3\n"}), &schema).expect("trim");
+        assert_eq!(repaired.value["ok"], true);
+        assert_eq!(repaired.value["n"], 3);
+        let repaired = normalize(&json!({"ok": "true story", "n": " 01 "}), &schema).expect("keep");
+        assert_eq!(repaired.value["ok"], "true story");
+        assert_eq!(repaired.value["n"], " 01 ");
+    }
+
+    #[test]
     fn boolean_and_integer_strings() {
         let schema = json!({
             "type": "object",
