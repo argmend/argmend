@@ -1337,6 +1337,54 @@ mod tests {
     }
 
     #[test]
+    fn numeric_bounds_reject_a_coercion_outside_the_range() {
+        let schema = json!({"type": "integer", "minimum": 0, "maximum": 10});
+        let err = normalize(&json!("-1"), &schema).expect_err("below");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let err = normalize(&json!("11"), &schema).expect_err("above");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("0"), &schema).expect("zero");
+        assert_eq!(repaired.value, 0);
+        let repaired = normalize(&json!("10"), &schema).expect("ten");
+        assert_eq!(repaired.value, 10);
+        let kept = normalize(&json!(-1), &schema).expect("already");
+        assert_eq!(kept.value, -1);
+        assert!(kept.rewrites.is_empty());
+
+        let exclusive = json!({
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "exclusiveMaximum": 10
+        });
+        let err = normalize(&json!("0"), &exclusive).expect_err("exclusive min");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let err = normalize(&json!("10"), &exclusive).expect_err("exclusive max");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("1"), &exclusive).expect("inside");
+        assert_eq!(repaired.value, 1);
+
+        let draft4 = json!({
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+        });
+        let err = normalize(&json!("0"), &draft4).expect_err("draft4");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("1"), &draft4).expect("above zero");
+        assert_eq!(repaired.value, 1);
+
+        let property = json!({
+            "properties": {"n": {"type": "number", "maximum": 1}}
+        });
+        let err = normalize(&json!({"n": "1.5"}), &property).expect_err("property");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let text = json!({"type": "integer", "minimum": "0"});
+        let repaired = normalize(&json!("-1"), &text).expect("string bound");
+        assert_eq!(repaired.value, -1);
+    }
+
+    #[test]
     fn not_rejects_a_coercion_that_matches_the_excluded_schema() {
         let schema = json!({"type": "integer", "not": {"const": 1}});
         let err = normalize(&json!("1"), &schema).expect_err("excluded");
