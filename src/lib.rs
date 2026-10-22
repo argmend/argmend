@@ -1337,6 +1337,35 @@ mod tests {
     }
 
     #[test]
+    fn nested_exact_float_matches_one_const_number() {
+        let schema = json!({"const": {"a": 1}});
+        let value: serde_json::Value = serde_json::from_str(r#"{"a": 1.0}"#).unwrap();
+        let repaired = normalize(&value, &schema).expect("nested");
+        assert_eq!(repaired.value["a"], 1);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail.contains("const"))
+        );
+
+        let row = json!({"const": [1, 2]});
+        let value: serde_json::Value = serde_json::from_str("[1.0, 2.0]").unwrap();
+        let repaired = normalize(&value, &row).expect("row");
+        assert_eq!(repaired.value, json!([1, 2]));
+
+        let both = json!({"enum": [{"a": 1}, {"a": 1.0}]});
+        let value: serde_json::Value = serde_json::from_str(r#"{"a": 1.0}"#).unwrap();
+        let kept = normalize(&value, &both).expect("both");
+        assert_eq!(kept.value["a"].as_f64(), Some(1.0));
+        assert!(kept.rewrites.is_empty());
+
+        let already = normalize(&json!({"a": 1}), &schema).expect("already");
+        assert_eq!(already.value["a"], 1);
+        assert!(already.rewrites.is_empty());
+    }
+
+    #[test]
     fn const_object_coerces_when_one_member_matches() {
         let schema = json!({"enum": [{"a": 1}, {"a": 2}]});
         let repaired = normalize(&json!({"a": "1"}), &schema).expect("one");
