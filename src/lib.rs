@@ -156,11 +156,16 @@ fn note(kind: RewriteKind, detail: &str) -> Rewrite {
     }
 }
 
+fn is_blank_input(raw: &str) -> bool {
+    raw.trim_matches(|ch: char| ch.is_ascii_whitespace() || ch == '\u{feff}')
+        .is_empty()
+}
+
 /// Parse `raw`, then apply [`normalize`] when a schema is present.
 ///
 /// Empty input is `{}`.
 pub fn repair_args(request: &RepairRequest<'_>) -> Result<Repaired, RepairError> {
-    if request.raw.is_empty() {
+    if is_blank_input(request.raw) {
         let value = Value::Object(serde_json::Map::new());
         let mut repaired = Repaired {
             value,
@@ -465,6 +470,26 @@ mod tests {
         .expect("valid");
         assert!(repaired.rewrites.is_empty());
         assert_eq!(repaired.value["path"], "a.rs");
+    }
+
+    #[test]
+    fn blank_input_is_empty_object() {
+        for raw in ["", "   ", "\n\t", "\u{feff}"] {
+            let repaired = repair_args(&RepairRequest {
+                tool_name: "edit_file",
+                raw,
+                schema: None,
+            })
+            .unwrap_or_else(|err| panic!("{raw:?}: {err}"));
+            assert_eq!(repaired.value, json!({}), "{raw:?}");
+            assert!(
+                repaired
+                    .rewrites
+                    .iter()
+                    .any(|item| item.kind == RewriteKind::Empty),
+                "{raw:?} {repaired:?}"
+            );
+        }
     }
 
     #[test]
