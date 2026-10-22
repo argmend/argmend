@@ -264,11 +264,7 @@ fn all_of(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     if branches.is_empty() {
         return None;
     }
-    if value.is_string()
-        && branches
-            .iter()
-            .any(unchecked_string_keyword)
-    {
+    if value.is_string() && branches.iter().any(unchecked_string_keyword) {
         return None;
     }
     let mut current = value.clone();
@@ -309,11 +305,7 @@ fn single_applicator<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>>
 fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     let branches =
         single_applicator(schema, "oneOf").or_else(|| single_applicator(schema, "anyOf"))?;
-    if value.is_string()
-        && branches
-            .iter()
-            .any(unchecked_string_keyword)
-    {
+    if value.is_string() && branches.iter().any(unchecked_string_keyword) {
         return None;
     }
     let mut matched = Vec::new();
