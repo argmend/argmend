@@ -159,7 +159,7 @@ fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
 
 /// When `if` matches, apply `then`. Otherwise apply `else`.
 /// The `then` result must still match `if`.
-/// Property schemas and `required` names are part of that match.
+/// A branch that refuses the value does not match, so `else` still runs.
 fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     if schema.get("allOf").is_some()
         || schema.get("oneOf").is_some()
@@ -173,8 +173,13 @@ fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> 
     if then_schema.is_none() && else_schema.is_none() {
         return None;
     }
-    let (probed, probe_rewrites) = normalize_child(value, if_schema).ok()?;
-    if branch_accepts(if_schema, &probed) {
+    let if_hit = match normalize_child(value, if_schema) {
+        Ok((probed, probe_rewrites)) if branch_accepts(if_schema, &probed) => {
+            Some((probed, probe_rewrites))
+        }
+        _ => None,
+    };
+    if let Some((probed, probe_rewrites)) = if_hit {
         let Some(then_schema) = then_schema else {
             if probed == *value && probe_rewrites.is_empty() {
                 return None;
@@ -249,7 +254,9 @@ fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite
         single_applicator(schema, "oneOf").or_else(|| single_applicator(schema, "anyOf"))?;
     let mut matched = Vec::new();
     for branch in branches {
-        let (next, rewrites) = normalize_child(value, branch).ok()?;
+        let Ok((next, rewrites)) = normalize_child(value, branch) else {
+            continue;
+        };
         if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
             matched.push((next, rewrites));
         }
@@ -370,12 +377,17 @@ fn known_constraint(schema: &Value) -> bool {
         || schema.get("prefixItems").is_some()
 }
 
-/// Type, `const`, `enum`, properties, array items, and `required` names.
+/// Type, `const`, `enum`, properties, array items, `required` names,
+/// `not`, numeric bounds, `multipleOf`, and `uniqueItems`.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
     constraints_hold(schema, value)
         && properties_match(schema, value)
         && elements_match(schema, value)
         && required_holds(schema, value)
+        && !violates_not(schema, value)
+        && !violates_bounds(schema, value)
+        && !violates_multiple(schema, value)
+        && !violates_unique(schema, value)
 }
 
 fn elements_match(schema: &Value, value: &Value) -> bool {
