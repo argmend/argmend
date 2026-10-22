@@ -207,7 +207,7 @@ fn note(kind: RewriteKind, detail: &str) -> Rewrite {
 }
 
 fn is_blank_input(raw: &str) -> bool {
-    raw.trim_matches(|ch: char| ch.is_ascii_whitespace() || ch == '\u{feff}')
+    raw.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
         .is_empty()
 }
 
@@ -1059,6 +1059,32 @@ mod tests {
             RepairOutcome::Valid(value) => assert_eq!(value["a"], "\u{a0}"),
             other => panic!("expected Valid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn blank_unicode_whitespace_follows_the_schema_type() {
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "edit_file",
+            raw: "\u{a0}",
+            schema: None,
+        })
+        .expect("object");
+        assert_eq!(repaired.value, json!({}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail.contains("{}"))
+        );
+
+        let array = json!({"type": "array"});
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "list",
+            raw: "\u{a0}\n",
+            schema: Some(&array),
+        })
+        .expect("array");
+        assert_eq!(repaired.value, json!([]));
     }
 
     #[test]
