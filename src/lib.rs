@@ -1337,6 +1337,48 @@ mod tests {
     }
 
     #[test]
+    fn size_limits_reject_a_coercion_past_the_bound() {
+        let props = json!({
+            "properties": {
+                "a": {"type": "integer"},
+                "c": {"type": "integer"}
+            },
+            "maxProperties": 1
+        });
+        let err = normalize(&json!({"a": "1", "c": "2"}), &props).expect_err("properties");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let already = normalize(&json!({"a": 1, "c": 2}), &props).expect("already");
+        assert_eq!(already.value["a"], 1);
+        assert!(already.rewrites.is_empty());
+
+        let dropped = json!({
+            "properties": {"a": {"type": "integer"}},
+            "additionalProperties": false,
+            "maxProperties": 1
+        });
+        let repaired = normalize(&json!({"a": "1", "b": 2}), &dropped).expect("drop");
+        assert_eq!(repaired.value, json!({"a": 1}));
+
+        let items = json!({
+            "items": {"type": "integer"},
+            "maxItems": 1
+        });
+        let err = normalize(&json!(["1", "2"]), &items).expect_err("items");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!(["1"]), &items).expect("one");
+        assert_eq!(repaired.value, json!([1]));
+
+        let short = json!({
+            "items": {"type": "integer"},
+            "minItems": 2
+        });
+        let err = normalize(&json!(["1"]), &short).expect_err("short");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!(["1", "2"]), &short).expect("long enough");
+        assert_eq!(repaired.value, json!([1, 2]));
+    }
+
+    #[test]
     fn nested_exact_float_matches_one_const_number() {
         let schema = json!({"const": {"a": 1}});
         let value: serde_json::Value = serde_json::from_str(r#"{"a": 1.0}"#).unwrap();

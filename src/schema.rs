@@ -50,6 +50,11 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value is not a const or enum member".into(),
             ));
         }
+        if violates_size(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value is outside the schema size".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -391,7 +396,7 @@ fn known_constraint(schema: &Value) -> bool {
 }
 
 /// Type, `const`, `enum`, properties, array items, `required` names,
-/// `not`, numeric bounds, `multipleOf`, `uniqueItems`, and `contains`.
+/// `not`, numeric bounds, `multipleOf`, `uniqueItems`, `contains`, and size limits.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
     constraints_hold(schema, value)
         && properties_match(schema, value)
@@ -402,6 +407,45 @@ fn branch_accepts(schema: &Value, value: &Value) -> bool {
         && !violates_multiple(schema, value)
         && !violates_unique(schema, value)
         && !violates_contains(schema, value)
+        && !violates_size(schema, value)
+}
+
+/// `minProperties`, `maxProperties`, `minItems`, and `maxItems`.
+/// A limit that is not an integer is ignored.
+fn violates_size(schema: &Value, value: &Value) -> bool {
+    let count = if let Some(obj) = value.as_object() {
+        let count = u64::try_from(obj.len()).unwrap_or(u64::MAX);
+        if let Some(max) = integer_limit(schema, "maxProperties")
+            && count > max
+        {
+            return true;
+        }
+        if let Some(min) = integer_limit(schema, "minProperties")
+            && count < min
+        {
+            return true;
+        }
+        return false;
+    } else if let Some(items) = value.as_array() {
+        u64::try_from(items.len()).unwrap_or(u64::MAX)
+    } else {
+        return false;
+    };
+    if let Some(max) = integer_limit(schema, "maxItems")
+        && count > max
+    {
+        return true;
+    }
+    if let Some(min) = integer_limit(schema, "minItems")
+        && count < min
+    {
+        return true;
+    }
+    false
+}
+
+fn integer_limit(schema: &Value, key: &str) -> Option<u64> {
+    schema.get(key).and_then(Value::as_u64)
 }
 
 /// `contains` fails when too few or too many items match.
