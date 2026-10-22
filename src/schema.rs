@@ -132,6 +132,7 @@ fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
 
 /// When `if` matches, apply `then`. Otherwise apply `else`.
 /// The `then` result must still match `if`.
+/// Property schemas and `required` names are part of that match.
 fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     if schema.get("allOf").is_some()
         || schema.get("oneOf").is_some()
@@ -146,7 +147,7 @@ fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> 
         return None;
     }
     let (probed, probe_rewrites) = normalize_child(value, if_schema).ok()?;
-    if constraints_hold(if_schema, &probed) {
+    if branch_accepts(if_schema, &probed) {
         let Some(then_schema) = then_schema else {
             if probed == *value && probe_rewrites.is_empty() {
                 return None;
@@ -154,7 +155,7 @@ fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> 
             return Some((probed, probe_rewrites));
         };
         let (next, more) = normalize_child(&probed, then_schema).ok()?;
-        if !constraints_hold(if_schema, &next) || !constraints_hold(then_schema, &next) {
+        if !branch_accepts(if_schema, &next) || !branch_accepts(then_schema, &next) {
             return None;
         }
         let mut rewrites = probe_rewrites;
@@ -166,7 +167,7 @@ fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> 
     }
     let else_schema = else_schema?;
     let (next, rewrites) = normalize_child(value, else_schema).ok()?;
-    if !constraints_hold(else_schema, &next) {
+    if !branch_accepts(else_schema, &next) {
         return None;
     }
     if next == *value && rewrites.is_empty() {
@@ -185,7 +186,7 @@ fn all_of(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     let mut rewrites = Vec::new();
     for branch in branches {
         let (next, more) = normalize_child(&current, branch).ok()?;
-        if !constraints_hold(branch, &next) {
+        if !branch_accepts(branch, &next) {
             return None;
         }
         current = next;
@@ -193,7 +194,7 @@ fn all_of(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     }
     for branch in branches {
         let (next, _) = normalize_child(&current, branch).ok()?;
-        if next != current || !constraints_hold(branch, &next) {
+        if next != current || !branch_accepts(branch, &next) {
             return None;
         }
     }
@@ -222,7 +223,7 @@ fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite
     let mut matched = Vec::new();
     for branch in branches {
         let (next, rewrites) = normalize_child(value, branch).ok()?;
-        if constraints_hold(branch, &next) && constraints_hold(schema, &next) {
+        if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
             matched.push((next, rewrites));
         }
     }
@@ -233,8 +234,37 @@ fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite
     }
 }
 
+/// Type, `const`, `enum`, properties, array items, and `required` names.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
-    constraints_hold(schema, value) && properties_match(schema, value)
+    constraints_hold(schema, value)
+        && properties_match(schema, value)
+        && elements_match(schema, value)
+        && required_holds(schema, value)
+}
+
+fn elements_match(schema: &Value, value: &Value) -> bool {
+    let Some(arr) = value.as_array() else {
+        return true;
+    };
+    if let Some((positions, tail)) = tuple_positions(schema) {
+        if matches!(tail, ArrayTail::Forbid) && arr.len() > positions.len() {
+            return false;
+        }
+        return arr
+            .iter()
+            .enumerate()
+            .all(|(index, item)| match positions.get(index) {
+                Some(position) => branch_accepts(position, item),
+                None => match tail {
+                    ArrayTail::Schema(rest) => branch_accepts(rest, item),
+                    ArrayTail::Keep | ArrayTail::Forbid => true,
+                },
+            });
+    }
+    let Some(items) = schema.get("items").filter(|items| items.is_object()) else {
+        return true;
+    };
+    arr.iter().all(|item| branch_accepts(items, item))
 }
 
 fn properties_match(schema: &Value, value: &Value) -> bool {
@@ -246,7 +276,7 @@ fn properties_match(schema: &Value, value: &Value) -> bool {
     };
     props.iter().all(|(key, prop_schema)| {
         obj.get(key)
-            .is_none_or(|child| constraints_hold(prop_schema, child))
+            .is_none_or(|child| branch_accepts(prop_schema, child))
     })
 }
 
@@ -498,6 +528,21 @@ fn denies_unknown(schema: &Value) -> bool {
         schema
     };
     matches!(schema.get("additionalProperties"), Some(Value::Bool(false)))
+}
+
+fn required_holds(schema: &Value, value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        let schema = if schema.get("properties").is_none() {
+            schema.get("parameters").unwrap_or(schema)
+        } else {
+            schema
+        };
+        return schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_none_or(|items| items.iter().all(|item| item.as_str().is_none()));
+    };
+    required_present(schema, obj)
 }
 
 fn required_present(schema: &Value, out: &Map<String, Value>) -> bool {
