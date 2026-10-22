@@ -234,11 +234,37 @@ fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite
     }
 }
 
-/// Type, `const`, `enum`, property schemas, and `required` names.
+/// Type, `const`, `enum`, properties, array items, and `required` names.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
     constraints_hold(schema, value)
         && properties_match(schema, value)
+        && elements_match(schema, value)
         && required_holds(schema, value)
+}
+
+fn elements_match(schema: &Value, value: &Value) -> bool {
+    let Some(arr) = value.as_array() else {
+        return true;
+    };
+    if let Some((positions, tail)) = tuple_positions(schema) {
+        if matches!(tail, ArrayTail::Forbid) && arr.len() > positions.len() {
+            return false;
+        }
+        return arr
+            .iter()
+            .enumerate()
+            .all(|(index, item)| match positions.get(index) {
+                Some(position) => branch_accepts(position, item),
+                None => match tail {
+                    ArrayTail::Schema(rest) => branch_accepts(rest, item),
+                    ArrayTail::Keep | ArrayTail::Forbid => true,
+                },
+            });
+    }
+    let Some(items) = schema.get("items").filter(|items| items.is_object()) else {
+        return true;
+    };
+    arr.iter().all(|item| branch_accepts(items, item))
 }
 
 fn properties_match(schema: &Value, value: &Value) -> bool {

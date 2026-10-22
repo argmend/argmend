@@ -1380,6 +1380,27 @@ mod tests {
         assert_eq!(kept.value["n"], "2");
         assert_eq!(kept.value["s"], "a");
         assert!(kept.rewrites.is_empty());
+
+        let rows = json!({
+            "if": {"prefixItems": [{"const": "count"}]},
+            "then": {"prefixItems": [{}, {"type": "integer"}]},
+            "else": {"prefixItems": [{}, {"type": "string"}]}
+        });
+        let repaired = normalize(&json!(["count", "1"]), &rows).expect("count");
+        assert_eq!(repaired.value[1], 1);
+        let kept = normalize(&json!(["other", "1"]), &rows).expect("other");
+        assert_eq!(kept.value[1], "1");
+        assert!(kept.rewrites.is_empty());
+
+        let numbers = json!({
+            "if": {"items": {"const": 1}},
+            "else": {"items": {"type": "integer"}}
+        });
+        let repaired = normalize(&json!(["2"]), &numbers).expect("else integer");
+        assert_eq!(repaired.value[0], 2);
+        let kept = normalize(&json!([1]), &numbers).expect("already");
+        assert_eq!(kept.value[0], 1);
+        assert!(kept.rewrites.is_empty());
     }
 
     #[test]
