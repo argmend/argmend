@@ -117,6 +117,10 @@ pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     if last_sig.is_none() || matches!(last_sig, Some(':') | Some(',')) {
         return None;
     }
+    // A final digit may be the start of a longer number that was cut off.
+    if last_sig.is_some_and(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
     let mut out = trimmed.to_string();
     while let Some(closer) = stack.pop() {
         out.push(closer);
@@ -208,19 +212,46 @@ fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
 }
 
 fn parameter_value(content: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
-    if !looks_like_json_container(content) {
-        return Ok((Value::String(content.to_string()), Vec::new()));
+    let trimmed = content.trim();
+    // `{` and `[` with no body are cut-off containers. A repaired string is
+    // file text: `"use strict";` must keep the quotes and the semicolon.
+    // A string that was already JSON is the parsed text.
+    if trimmed == "{" || trimmed == "[" {
+        return Err(RepairError::Unfixable(
+            "xml parameter container is truncated".into(),
+        ));
     }
-    // A container that is not JSON must not become a string. That would
-    // hand the host a different type. Repair it, or refuse.
-    match crate::repair_json(content) {
-        RepairOutcome::Valid(value) => Ok((value, Vec::new())),
-        RepairOutcome::Repaired { value, repairs } => Ok((value, repairs)),
-        RepairOutcome::Unfixable(reason) => Err(RepairError::Unfixable(reason)),
+    match crate::repair_json(trimmed) {
+        RepairOutcome::Valid(value)
+            if value.is_object() || value.is_array() || value.is_string() =>
+        {
+            Ok((value, Vec::new()))
+        }
         RepairOutcome::Ambiguous(reason) => Err(RepairError::Ambiguous(reason)),
+        RepairOutcome::Repaired { value, repairs }
+            if value.is_object() || (value.is_array() && !bare_bracket_word(trimmed)) =>
+        {
+            Ok((value, repairs))
+        }
+        _ => Ok((Value::String(content.to_string()), Vec::new())),
     }
 }
 
-fn looks_like_json_container(content: &str) -> bool {
-    matches!(content.as_bytes().first(), Some(b'{' | b'[' | b'"'))
+/// `[package]` and `[package,]` are file text. Quote repair would turn the
+/// word into a one-element array. A real array already has a JSON value.
+fn bare_bracket_word(trimmed: &str) -> bool {
+    let Some(inner) = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+    else {
+        return false;
+    };
+    let inner = inner.trim().trim_end_matches(',').trim();
+    if inner.is_empty() || matches!(inner, "true" | "false" | "null" | "True" | "False" | "None") {
+        return false;
+    }
+    inner
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+        && inner.chars().any(|ch| ch.is_ascii_alphabetic())
 }

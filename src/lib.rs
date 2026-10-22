@@ -500,7 +500,6 @@ mod tests {
             r#"[{"a":1,"a":2}]"#,
             r#"{"ü":1,"ü":2}"#,
             "{\"a\\\"b\":1,\"a\\\"b\":2}",
-            r#"{"a":1,"a":2"#,
         ] {
             assert!(
                 matches!(repair_json(raw), RepairOutcome::Ambiguous(_)),
@@ -569,9 +568,13 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
-        match repair_json("{\"a\":1,\"a\":1") {
+        assert!(matches!(
+            repair_json("{\"a\":1,\"a\":1"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_json("{\"a\":true,\"a\":true") {
             RepairOutcome::Repaired { value, repairs } => {
-                assert_eq!(value["a"], 1);
+                assert_eq!(value["a"], true);
                 assert!(
                     repairs
                         .iter()
@@ -653,6 +656,67 @@ mod tests {
         });
         let err = normalize(&json!({"filepath": "a.rs"}), &schema).unwrap_err();
         assert!(matches!(err, RepairError::Ambiguous(_)));
+    }
+
+    #[test]
+    fn applicators_keep_the_outer_property_schema() {
+        let bounded = json!({
+            "properties": {"n": {"type": "integer", "maximum": 10}},
+            "allOf": [{"properties": {"n": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"n": "50"}), &bounded).expect_err("too big");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+        let repaired = normalize(&json!({"n": "5"}), &bounded).expect("inside");
+        assert_eq!(repaired.value["n"], 5);
+
+        let closed = json!({
+            "properties": {"n": {"type": "integer"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"n": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"n": "5", "extra": 1, "more": 2}), &closed).expect_err("two");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+
+        let text = json!({
+            "properties": {"flag": {"type": "string"}},
+            "if": {"properties": {"flag": {"type": "boolean"}}},
+            "then": {"properties": {"flag": {"type": "boolean"}}}
+        });
+        let err = normalize(&json!({"flag": "true"}), &text).expect_err("outer string");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+
+        let one = json!({
+            "properties": {"n": {"type": "integer", "maximum": 10}},
+            "oneOf": [{"properties": {"n": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"n": "50"}), &one).expect_err("oneOf");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+    }
+
+    #[test]
+    fn huge_integers_do_not_skip_bounds_or_enums() {
+        let bounded = json!({"type": "integer", "maximum": 100});
+        let err = normalize(&json!("9007199254740993"), &bounded).expect_err("huge");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+        let choices = json!({"enum": [9007199254740992_i64]});
+        let kept = normalize(&json!("9007199254740993"), &choices).expect("not a member");
+        assert_eq!(kept.value, json!("9007199254740993"));
+        assert!(kept.rewrites.is_empty(), "{:?}", kept.rewrites);
+        let exact = json!({"const": 1});
+        let repaired = normalize(&json!(1.0), &exact).expect("one");
+        assert_eq!(repaired.value, 1);
+
+        let fractional = json!({"type": "integer", "maximum": 10.5});
+        let err = normalize(&json!("11"), &fractional).expect_err("fraction");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+        let repaired = normalize(&json!("10"), &fractional).expect("under");
+        assert_eq!(repaired.value, 10);
+        let far = json!({"type": "integer", "maximum": 10.5});
+        let err = normalize(&json!("9007199254740993"), &far).expect_err("far above");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+        let low = json!({"type": "integer", "minimum": 10.5});
+        let err = normalize(&json!("-9007199254740993"), &low).expect_err("far below");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
     }
 
     #[test]
@@ -1086,11 +1150,38 @@ mod tests {
 
     #[test]
     fn complete_array_still_closes() {
-        match repair_json("[1, 2") {
+        match repair_json("[\"a\", \"b\"") {
             RepairOutcome::Repaired { value, .. } => {
-                assert_eq!(value, json!([1, 2]));
+                assert_eq!(value, json!(["a", "b"]));
             }
             other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("[true, false") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, json!([true, false]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cut_off_number_is_not_closed() {
+        assert!(matches!(
+            repair_json("{\"line\": 12"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\": -1"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(repair_json("[1, 2"), RepairOutcome::Unfixable(_)));
+        assert!(matches!(
+            repair_json("{\"a\":1,\"a\":2"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_json("{\"a\": true") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], true),
+            other => panic!("finished word {other:?}"),
         }
     }
 
@@ -1098,6 +1189,35 @@ mod tests {
     fn xml_truncated_container_is_unfixable() {
         let raw = r#"<parameter name="meta">{</parameter>"#;
         assert!(matches!(repair_json(raw), RepairOutcome::Unfixable(_)));
+    }
+
+    #[test]
+    fn xml_text_that_is_not_a_container_stays_text() {
+        match repair_json(r#"<parameter name="content">"use strict";</parameter>"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["content"], "\"use strict\";");
+            }
+            other => panic!("quoted fragment {other:?}"),
+        }
+        let raw = "<parameter name=\"body\">[package]\nname = \"x\"</parameter>";
+        match repair_json(raw) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["body"], "[package]\nname = \"x\"");
+            }
+            other => panic!("toml {other:?}"),
+        }
+        match repair_json(r#"<parameter name="note">[TODO] fix it</parameter>"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["note"], "[TODO] fix it"),
+            other => panic!("note {other:?}"),
+        }
+        match repair_json(r#"<parameter name="body">[package]</parameter>"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["body"], "[package]"),
+            other => panic!("bracket word {other:?}"),
+        }
+        assert!(matches!(
+            repair_json(r#"<parameter name="meta">{"a":1,"a":2}</parameter>"#),
+            RepairOutcome::Ambiguous(_)
+        ));
     }
 
     #[test]
