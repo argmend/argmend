@@ -126,6 +126,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = collapse_repeated_object_commas(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("collapsed repeated commas"));
+        text = cleaned;
+    }
+
     let cleaned = remove_trailing_commas(&text);
     if cleaned != text {
         repairs.push(syntax_note("removed trailing commas"));
@@ -1467,6 +1473,59 @@ fn is_ident(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+/// Collapse `,,` inside an object to one comma. An array keeps `,,`,
+/// because that could be a missing element or an elided one.
+pub(crate) fn collapse_repeated_object_commas(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut index = 0;
+    let mut stack: Vec<bool> = Vec::new();
+    while index < len {
+        let ch = chars[index];
+        if ch == '"' {
+            index = copy_quoted(&chars, index, &mut out);
+            continue;
+        }
+        if ch == '{' || ch == '[' {
+            out.push(ch);
+            stack.push(ch == '{');
+            index += 1;
+            continue;
+        }
+        if ch == '}' || ch == ']' {
+            out.push(ch);
+            stack.pop();
+            index += 1;
+            continue;
+        }
+        if ch == ',' && stack.last() == Some(&true) {
+            let mut next = index + 1;
+            let mut extra = false;
+            while next < len {
+                if chars[next].is_ascii_whitespace() {
+                    next += 1;
+                    continue;
+                }
+                if chars[next] == ',' {
+                    extra = true;
+                    next += 1;
+                    continue;
+                }
+                break;
+            }
+            if extra {
+                out.push(',');
+                index = next;
+                continue;
+            }
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
 /// Remove trailing commas before `]` or `}`.
 pub(crate) fn remove_trailing_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1752,6 +1811,49 @@ mod tests {
         assert!(matches!(
             repair_tool_call_json("()"),
             RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn repeated_commas_in_an_object_collapse() {
+        match repair_tool_call_json(r#"{"a":1,,"b":2}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("repeated"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{"a":1, , "b":2}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{"a":1,,,}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{"a":{"b":1,,}}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"]["b"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("[1,,2]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"b,,c"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1,"b":2}"#),
+            RepairOutcome::Valid(_)
         ));
     }
 
