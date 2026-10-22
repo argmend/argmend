@@ -91,7 +91,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         None => (raw, Vec::new()),
     };
     if let Ok(value) = serde_json::from_str(raw) {
-        return Ok((value, prefix));
+        return with_unique_keys(raw, value, prefix);
     }
 
     let mut body = raw.to_string();
@@ -99,7 +99,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         prefix.push(note(RewriteKind::Fence, "unwrapped markdown fence"));
         body = inner;
         if let Ok(value) = serde_json::from_str(&body) {
-            return Ok((value, prefix));
+            return with_unique_keys(&body, value, prefix);
         }
     }
 
@@ -110,7 +110,8 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
                 prefix.extend(repairs);
                 return Ok((value, prefix));
             }
-            RepairOutcome::Unfixable(_) | RepairOutcome::Ambiguous(_) => {}
+            RepairOutcome::Ambiguous(reason) => return Err(RepairError::Ambiguous(reason)),
+            RepairOutcome::Unfixable(_) => {}
         }
     }
 
@@ -118,7 +119,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let parse_error = match serde_json::from_str::<Value>(&staged.text) {
         Ok(value) => {
             prefix.extend(staged.repairs);
-            return Ok((value, prefix));
+            return with_unique_keys(&staged.text, value, prefix);
         }
         Err(err) => err,
     };
@@ -128,7 +129,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
     {
         prefix.extend(staged.repairs);
         prefix.push(note(RewriteKind::ClosedTruncation, "closed truncated json"));
-        return Ok((value, prefix));
+        return with_unique_keys(&closed, value, prefix);
     }
 
     match salvage::xml_parameters(&body)? {
@@ -147,6 +148,17 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
 fn without_leading_bom(raw: &str) -> Option<&str> {
     let rest = raw.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
     rest.strip_prefix('\u{feff}')
+}
+
+fn with_unique_keys(
+    text: &str,
+    value: Value,
+    mut repairs: Vec<Rewrite>,
+) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    for detail in syntax::duplicate_key_notes(text)? {
+        repairs.push(note(RewriteKind::Syntax, &detail));
+    }
+    Ok((value, repairs))
 }
 
 fn note(kind: RewriteKind, detail: &str) -> Rewrite {
@@ -440,6 +452,101 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
         assert!(matches!(repair_json(raw), RepairOutcome::Ambiguous(_)));
+    }
+
+    #[test]
+    fn duplicate_json_key_with_different_values_is_ambiguous() {
+        for raw in [
+            r#"{"a":1,"a":2}"#,
+            r#"{"a":1,"b":{"a":9},"a":3}"#,
+            r#"[{"a":1,"a":2}]"#,
+            r#"{"ü":1,"ü":2}"#,
+            "{\"a\\\"b\":1,\"a\\\"b\":2}",
+            r#"{"a":1,"a":2"#,
+        ] {
+            assert!(
+                matches!(repair_json(raw), RepairOutcome::Ambiguous(_)),
+                "{raw:?} -> {:?}",
+                repair_json(raw)
+            );
+        }
+        let err = repair_args(&RepairRequest {
+            tool_name: "edit_file",
+            raw: r#"{"a":1,"a":2}"#,
+            schema: None,
+        })
+        .unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        match repair_json(r#"{"a":{"a":1},"b":2}"#) {
+            RepairOutcome::Valid(value) => {
+                assert_eq!(value["a"]["a"], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("expected Valid, got {other:?}"),
+        }
+        match repair_json(r#"{"msg":"{\"a\":1,\"a\":2}"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["msg"], r#"{"a":1,"a":2}"#),
+            other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_json_key_with_the_same_value_is_recorded() {
+        match repair_json(r#"{"a":1,"a":1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail == "dropped duplicate key a")
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{a: 1, a: 1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("bare keys"))
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail == "dropped duplicate key a")
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{"a":{"x":1,"y":2},"a":{"y":2,"x":1}}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"]["x"], 1);
+                assert_eq!(value["a"]["y"], 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail == "dropped duplicate key a")
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{\"a\":1,\"a\":1") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("closed truncated"))
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail == "dropped duplicate key a")
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
     }
 
     #[test]

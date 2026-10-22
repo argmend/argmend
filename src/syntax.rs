@@ -1,6 +1,10 @@
 //! Syntax stages for tool-argument JSON. Valid JSON is not rewritten.
 
-use super::{RepairOutcome, Rewrite, RewriteKind};
+use std::collections::{HashMap, HashSet};
+
+use serde_json::Value;
+
+use super::{RepairError, RepairOutcome, Rewrite, RewriteKind};
 
 /// Attempt to parse `raw` as JSON, applying progressive repairs if the
 /// initial parse fails.
@@ -91,15 +95,240 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
 
 pub(crate) fn repair_tool_call_json(raw: &str) -> RepairOutcome {
     if let Ok(value) = serde_json::from_str(raw) {
-        return RepairOutcome::Valid(value);
+        return outcome_with_unique_keys(raw, value, Vec::new());
     }
     let staged = apply_stages(raw);
     match serde_json::from_str(&staged.text) {
-        Ok(value) => RepairOutcome::Repaired {
-            value,
-            repairs: staged.repairs,
-        },
+        Ok(value) => outcome_with_unique_keys(&staged.text, value, staged.repairs),
         Err(e) => RepairOutcome::Unfixable(format!("parse failed after all repairs: {e}")),
+    }
+}
+
+fn outcome_with_unique_keys(text: &str, value: Value, mut repairs: Vec<Rewrite>) -> RepairOutcome {
+    match duplicate_key_notes(text) {
+        Ok(notes) => {
+            for detail in notes {
+                repairs.push(Rewrite {
+                    kind: RewriteKind::Syntax,
+                    detail,
+                });
+            }
+            if repairs.is_empty() {
+                RepairOutcome::Valid(value)
+            } else {
+                RepairOutcome::Repaired { value, repairs }
+            }
+        }
+        Err(RepairError::Ambiguous(reason)) => RepairOutcome::Ambiguous(reason),
+        Err(RepairError::Unfixable(reason)) => RepairOutcome::Unfixable(reason),
+    }
+}
+
+/// Repeated object keys with the same value are collapsed and recorded.
+/// Two different values are ambiguous, because a parser may keep either one.
+pub(crate) fn duplicate_key_notes(text: &str) -> Result<Vec<String>, RepairError> {
+    let mut scan = KeyScan {
+        text,
+        chars: text.char_indices().collect(),
+        index: 0,
+        dropped: Vec::new(),
+    };
+    scan.parse_value()?;
+    Ok(scan.dropped)
+}
+
+struct KeyScan<'a> {
+    text: &'a str,
+    chars: Vec<(usize, char)>,
+    index: usize,
+    dropped: Vec<String>,
+}
+
+impl KeyScan<'_> {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.index).map(|(_, ch)| *ch)
+    }
+
+    fn bump(&mut self) {
+        self.index += 1;
+    }
+
+    fn byte_at(&self) -> usize {
+        self.chars
+            .get(self.index)
+            .map(|(byte, _)| *byte)
+            .unwrap_or(self.text.len())
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(' ' | '\t' | '\n' | '\r')) {
+            self.bump();
+        }
+    }
+
+    fn parse_value(&mut self) -> Result<(), RepairError> {
+        self.skip_ws();
+        match self.peek() {
+            Some('{') => self.parse_object(),
+            Some('[') => self.parse_array(),
+            Some('"') => {
+                self.parse_string()?;
+                Ok(())
+            }
+            Some('t') => {
+                self.parse_literal("true");
+                Ok(())
+            }
+            Some('f') => {
+                self.parse_literal("false");
+                Ok(())
+            }
+            Some('n') => {
+                self.parse_literal("null");
+                Ok(())
+            }
+            Some('-' | '0'..='9') => {
+                self.parse_number();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn parse_object(&mut self) -> Result<(), RepairError> {
+        self.bump();
+        let mut seen: HashMap<String, Value> = HashMap::new();
+        let mut noted = HashSet::new();
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some('}') => {
+                    self.bump();
+                    return Ok(());
+                }
+                Some('"') => {}
+                _ => return Ok(()),
+            }
+            let key = self.parse_string()?;
+            self.skip_ws();
+            if self.peek() == Some(':') {
+                self.bump();
+            }
+            self.skip_ws();
+            let start = self.byte_at();
+            self.parse_value()?;
+            let end = self.byte_at();
+            let slice = self.text[start..end].trim();
+            let parsed = serde_json::from_str(slice).map_err(|_| {
+                RepairError::Unfixable(format!("duplicate key scan could not read '{key}'"))
+            })?;
+            match seen.get(&key) {
+                Some(prev) if prev != &parsed => {
+                    return Err(RepairError::Ambiguous(format!("duplicate key '{key}'")));
+                }
+                Some(_) => {
+                    if noted.insert(key.clone()) {
+                        self.dropped.push(format!("dropped duplicate key {key}"));
+                    }
+                }
+                None => {
+                    seen.insert(key, parsed);
+                }
+            }
+            self.skip_ws();
+            match self.peek() {
+                Some(',') => self.bump(),
+                Some('}') => {
+                    self.bump();
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    fn parse_array(&mut self) -> Result<(), RepairError> {
+        self.bump();
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some(']') => {
+                    self.bump();
+                    return Ok(());
+                }
+                None => return Ok(()),
+                _ => self.parse_value()?,
+            }
+            self.skip_ws();
+            match self.peek() {
+                Some(',') => self.bump(),
+                Some(']') => {
+                    self.bump();
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<String, RepairError> {
+        let start = self.byte_at();
+        if self.peek() != Some('"') {
+            return Err(RepairError::Unfixable(
+                "duplicate key scan expected a string".into(),
+            ));
+        }
+        self.bump();
+        while let Some(ch) = self.peek() {
+            if ch == '\\' {
+                self.bump();
+                if self.peek().is_some() {
+                    self.bump();
+                }
+                continue;
+            }
+            self.bump();
+            if ch == '"' {
+                break;
+            }
+        }
+        let end = self.byte_at();
+        serde_json::from_str(&self.text[start..end]).map_err(|_| {
+            RepairError::Unfixable("duplicate key scan could not read a string".into())
+        })
+    }
+
+    fn parse_literal(&mut self, literal: &str) {
+        for expected in literal.chars() {
+            if self.peek() != Some(expected) {
+                return;
+            }
+            self.bump();
+        }
+    }
+
+    fn parse_number(&mut self) {
+        if self.peek() == Some('-') {
+            self.bump();
+        }
+        self.parse_digits();
+        if self.peek() == Some('.') {
+            self.bump();
+            self.parse_digits();
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            self.bump();
+            if matches!(self.peek(), Some('+' | '-')) {
+                self.bump();
+            }
+            self.parse_digits();
+        }
+    }
+
+    fn parse_digits(&mut self) {
+        while matches!(self.peek(), Some('0'..='9')) {
+            self.bump();
+        }
     }
 }
 
