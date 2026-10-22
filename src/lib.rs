@@ -240,6 +240,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn fence_with_trailing_comment_unwraps() {
+        for raw in [
+            "```json\n{\"a\": 1}\n``` # done",
+            "```json\n{\"a\": 1}\n```\n// done",
+        ] {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1, "{raw:?}"),
+                other => panic!("{raw:?}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            repair_json("```json\n{\"a\": 1}\n```\n{\"b\": 2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn fence_with_jsonc_tag_unwraps() {
         let raw = "```jsonc\n{file: \"a.rs\"}\n```";
         let repaired = repair_args(&RepairRequest {
