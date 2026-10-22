@@ -1360,6 +1360,34 @@ mod tests {
     }
 
     #[test]
+    fn dependent_names_reject_a_coercion_that_omits_them() {
+        let schema = json!({
+            "properties": {"flag": {"type": "boolean"}},
+            "dependentRequired": {"flag": ["n"]}
+        });
+        let err = normalize(&json!({"flag": "true"}), &schema).expect_err("missing");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let repaired = normalize(&json!({"flag": "true", "n": 1}), &schema).expect("present");
+        assert_eq!(repaired.value["flag"], true);
+        assert_eq!(repaired.value["n"], 1);
+
+        let already = normalize(&json!({"flag": true}), &schema).expect("already");
+        assert_eq!(already.value["flag"], true);
+        assert!(already.rewrites.is_empty());
+
+        let dependencies = json!({
+            "properties": {"flag": {"type": "boolean"}},
+            "dependencies": {"flag": ["n"]}
+        });
+        let err = normalize(&json!({"flag": "true"}), &dependencies).expect_err("dependencies");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired =
+            normalize(&json!({"flag": "true", "n": 1}), &dependencies).expect("dep present");
+        assert_eq!(repaired.value["flag"], true);
+    }
+
+    #[test]
     fn size_limits_reject_a_coercion_past_the_bound() {
         let props = json!({
             "properties": {

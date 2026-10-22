@@ -55,6 +55,11 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value is outside the schema size".into(),
             ));
         }
+        if violates_dependent(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value misses a dependent property".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -434,12 +439,14 @@ fn known_constraint(schema: &Value) -> bool {
         || schema.get("enum").is_some()
         || schema.get("properties").is_some()
         || schema.get("required").is_some()
+        || schema.get("dependentRequired").is_some()
         || schema.get("items").is_some()
         || schema.get("prefixItems").is_some()
 }
 
 /// Type, `const`, `enum`, properties, array items, `required` names,
-/// `not`, numeric bounds, `multipleOf`, `uniqueItems`, `contains`, and size limits.
+/// dependent names, `not`, numeric bounds, `multipleOf`, `uniqueItems`,
+/// `contains`, and size limits.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
     constraints_hold(schema, value)
         && properties_match(schema, value)
@@ -451,6 +458,38 @@ fn branch_accepts(schema: &Value, value: &Value) -> bool {
         && !violates_unique(schema, value)
         && !violates_contains(schema, value)
         && !violates_size(schema, value)
+        && !violates_dependent(schema, value)
+}
+
+/// `dependentRequired`, and the array form of `dependencies`.
+/// A present property must bring those names with it. A schema-form
+/// dependency is not a name list. A non-object value is not checked.
+fn violates_dependent(schema: &Value, value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    let schema = if schema.get("properties").is_none() {
+        schema.get("parameters").unwrap_or(schema)
+    } else {
+        schema
+    };
+    dependent_names_missing(schema, "dependentRequired", obj)
+        || dependent_names_missing(schema, "dependencies", obj)
+}
+
+fn dependent_names_missing(schema: &Value, keyword: &str, obj: &Map<String, Value>) -> bool {
+    let Some(map) = schema.get(keyword).and_then(Value::as_object) else {
+        return false;
+    };
+    map.iter().any(|(name, need)| {
+        obj.contains_key(name)
+            && need.as_array().is_some_and(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|needed| !obj.contains_key(needed))
+            })
+    })
 }
 
 /// `minProperties`, `maxProperties`, `minItems`, and `maxItems`.
