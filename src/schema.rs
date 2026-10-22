@@ -312,6 +312,19 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
         ));
         return Value::Number(number);
     }
+    if let Some(matched) = float_const_or_enum(value, schema) {
+        let word = if schema.get("const").is_some() {
+            "const"
+        } else {
+            "enum"
+        };
+        let shown = value.as_f64().unwrap_or(0.0);
+        rewrites.push(rewrite(
+            RewriteKind::NumberString,
+            format!("{word} number {shown:?}"),
+        ));
+        return matched;
+    }
     let Some(text) = value.as_str() else {
         return value.clone();
     };
@@ -398,6 +411,40 @@ fn integer_from_exact_float(value: &Value, schema: &Value) -> Option<serde_json:
         return None;
     }
     Some(serde_json::Number::from(as_int))
+}
+
+fn float_const_or_enum(value: &Value, schema: &Value) -> Option<Value> {
+    if value.as_i64().is_some() || value.as_u64().is_some() {
+        return None;
+    }
+    let number = value.as_f64()?;
+    if !number.is_finite() || number.fract() != 0.0 || number.abs() > (1u64 << 53) as f64 {
+        return None;
+    }
+    let targets = constrained_values(schema)?;
+    if targets.contains(&value) {
+        return None;
+    }
+    let as_int = serde_json::Number::from(number as i64);
+    let mut chosen: Option<&Value> = None;
+    for target in &targets {
+        let Some(target_number) = target.as_number() else {
+            continue;
+        };
+        if !numbers_equal(&as_int, target_number) {
+            continue;
+        }
+        match chosen {
+            Some(existing) if values_equivalent(existing, target) => {
+                if target.as_i64().is_some() || target.as_u64().is_some() {
+                    chosen = Some(target);
+                }
+            }
+            Some(_) => return None,
+            None => chosen = Some(target),
+        }
+    }
+    chosen.cloned()
 }
 
 fn const_or_enum_value(original: &Value, text: &str, schema: &Value) -> Option<Value> {

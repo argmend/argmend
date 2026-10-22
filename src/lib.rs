@@ -1294,6 +1294,36 @@ mod tests {
     }
 
     #[test]
+    fn exact_float_matches_one_const_or_enum_number() {
+        let value: serde_json::Value = serde_json::from_str("1.0").unwrap();
+        let repaired = normalize(&value, &json!({"const": 1})).expect("const");
+        assert_eq!(repaired.value.as_i64(), Some(1));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail.contains("const"))
+        );
+
+        let repaired = normalize(&value, &json!({"enum": [1, 2]})).expect("enum");
+        assert_eq!(repaired.value.as_i64(), Some(1));
+
+        let kept = normalize(&value, &json!({"const": 2})).expect("other");
+        assert!(kept.value.as_i64().is_none());
+        assert!(kept.rewrites.is_empty());
+
+        let fraction: serde_json::Value = serde_json::from_str("1.5").unwrap();
+        let kept = normalize(&fraction, &json!({"enum": [1, 2]})).expect("fraction");
+        assert!(kept.value.as_i64().is_none());
+        assert!(kept.rewrites.is_empty());
+
+        let same: serde_json::Value = serde_json::from_str(r#"{"enum":[1.0,2]}"#).unwrap();
+        let repaired = normalize(&value, &same).expect("already");
+        assert!(repaired.value.as_i64().is_none());
+        assert!(repaired.rewrites.is_empty());
+    }
+
+    #[test]
     fn const_and_enum_coerce_one_matching_string() {
         let repaired = normalize(&json!("1"), &json!({"enum": [1, 2]})).expect("enum");
         assert_eq!(repaired.value, 1);
