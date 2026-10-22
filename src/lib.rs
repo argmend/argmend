@@ -1337,6 +1337,34 @@ mod tests {
     }
 
     #[test]
+    fn multiple_of_rejects_a_coercion_that_is_not_a_multiple() {
+        let schema = json!({"type": "integer", "multipleOf": 2});
+        let err = normalize(&json!("3"), &schema).expect_err("odd");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let err = normalize(&json!("-3"), &schema).expect_err("negative");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("4"), &schema).expect("even");
+        assert_eq!(repaired.value, 4);
+        let repaired = normalize(&json!("-2"), &schema).expect("neg even");
+        assert_eq!(repaired.value, -2);
+        let repaired = normalize(&json!("0"), &schema).expect("zero");
+        assert_eq!(repaired.value, 0);
+        let kept = normalize(&json!(3), &schema).expect("already");
+        assert_eq!(kept.value, 3);
+        assert!(kept.rewrites.is_empty());
+
+        let zero = json!({"type": "integer", "multipleOf": 0});
+        let repaired = normalize(&json!("3"), &zero).expect("zero multiple");
+        assert_eq!(repaired.value, 3);
+
+        let property = json!({
+            "properties": {"n": {"type": "integer", "multipleOf": 2}}
+        });
+        let err = normalize(&json!({"n": "5"}), &property).expect_err("property");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn numeric_bounds_reject_a_coercion_outside_the_range() {
         let schema = json!({"type": "integer", "minimum": 0, "maximum": 10});
         let err = normalize(&json!("-1"), &schema).expect_err("below");
