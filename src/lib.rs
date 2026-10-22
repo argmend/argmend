@@ -1021,4 +1021,18 @@ mod tests {
             RepairOutcome::Valid(_)
         ));
     }
+
+    #[test]
+    fn unknown_fence_word_is_not_a_language_tag() {
+        assert!(matches!(
+            repair_json("```hello {a: 1}```"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_json("```javascript\n{\"a\": 1}\n```") {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["a"], 1);
+            }
+            other => panic!("expected JSON, got {other:?}"),
+        }
+    }
 }
