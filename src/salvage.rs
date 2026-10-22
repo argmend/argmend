@@ -9,12 +9,18 @@ pub(crate) fn unwrap_fence(raw: &str) -> Option<String> {
     let rest = trimmed.strip_prefix("```")?;
     let rest = strip_fence_info(rest);
     let rest = rest.strip_prefix('\n').unwrap_or(rest);
-    let end = rest.rfind("```")?;
-    let tail = &rest[end + 3..];
-    if tail.trim().is_empty() || tail_is_comment(tail) {
-        Some(rest[..end].trim().to_string())
-    } else {
+    if let Some(end) = rest.rfind("```") {
+        let tail = &rest[end + 3..];
+        if tail.trim().is_empty() || tail_is_comment(tail) {
+            return Some(rest[..end].trim().to_string());
+        }
+        return None;
+    }
+    let body = rest.trim();
+    if body.is_empty() {
         None
+    } else {
+        Some(body.to_string())
     }
 }
 
