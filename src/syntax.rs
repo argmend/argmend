@@ -755,7 +755,7 @@ fn colon_needed(chars: &[char], index: usize) -> bool {
         || ch == '-'
         || ch == '_'
         || ch.is_ascii_digit()
-        || ch.is_ascii_alphabetic()
+        || ch.is_alphabetic()
 }
 
 /// Wrap bare (unquoted) object keys in double quotes.
@@ -2845,6 +2845,37 @@ mod tests {
         ));
         assert!(matches!(
             repair_tool_call_json("{123}"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn unicode_value_without_a_colon_is_quoted() {
+        match repair_tool_call_json("{name été}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["name"], "été"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{key 東京}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["key"], "東京"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{123 été}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["123"], "été"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{name été, age 2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["name"], "été");
+                assert_eq!(value["age"], 2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"name": "été"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{name été plus}"),
             RepairOutcome::Unfixable(_)
         ));
     }
