@@ -219,6 +219,13 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
     if types.is_empty() || types.contains(&"string") {
         return value.clone();
     }
+    if types.contains(&"null") && text.eq_ignore_ascii_case("null") {
+        rewrites.push(rewrite(
+            RewriteKind::NullString,
+            format!("null string {text}"),
+        ));
+        return Value::Null;
+    }
     if types.contains(&"boolean") {
         if text.eq_ignore_ascii_case("true") {
             rewrites.push(rewrite(
