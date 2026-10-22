@@ -18,6 +18,16 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 }
 
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    let (next, rewrites) = normalize_known(value, schema)?;
+    if (next != *value || !rewrites.is_empty()) && violates_not(schema, &next) {
+        return Err(RepairError::Ambiguous(
+            "coerced value is excluded by not".into(),
+        ));
+    }
+    Ok((next, rewrites))
+}
+
+fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
     if let Some((next, rewrites)) = if_then_else(value, schema) {
         return Ok((next, rewrites));
     }
@@ -232,6 +242,25 @@ fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite
     } else {
         None
     }
+}
+
+/// A rewrite that satisfies `not` is refused.
+/// `not` with only an unrecognized keyword is not a match.
+fn violates_not(schema: &Value, value: &Value) -> bool {
+    let Some(not_schema) = schema.get("not") else {
+        return false;
+    };
+    known_constraint(not_schema) && branch_accepts(not_schema, value)
+}
+
+fn known_constraint(schema: &Value) -> bool {
+    schema.get("type").is_some()
+        || schema.get("const").is_some()
+        || schema.get("enum").is_some()
+        || schema.get("properties").is_some()
+        || schema.get("required").is_some()
+        || schema.get("items").is_some()
+        || schema.get("prefixItems").is_some()
 }
 
 /// Type, `const`, `enum`, properties, array items, and `required` names.

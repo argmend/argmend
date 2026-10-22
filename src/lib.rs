@@ -1337,6 +1337,42 @@ mod tests {
     }
 
     #[test]
+    fn not_rejects_a_coercion_that_matches_the_excluded_schema() {
+        let schema = json!({"type": "integer", "not": {"const": 1}});
+        let err = normalize(&json!("1"), &schema).expect_err("excluded");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("2"), &schema).expect("allowed");
+        assert_eq!(repaired.value, 2);
+        let kept = normalize(&json!(1), &schema).expect("already");
+        assert_eq!(kept.value, 1);
+        assert!(kept.rewrites.is_empty());
+
+        let unknown = json!({"type": "integer", "not": {"maximum": 0}});
+        let repaired = normalize(&json!("1"), &unknown).expect("unknown keyword");
+        assert_eq!(repaired.value, 1);
+
+        let object = json!({
+            "properties": {"n": {"type": "integer"}},
+            "not": {"properties": {"n": {"const": 1}}}
+        });
+        let err = normalize(&json!({"n": "1"}), &object).expect_err("property");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!({"n": "2"}), &object).expect("other");
+        assert_eq!(repaired.value["n"], 2);
+
+        let branch = json!({
+            "if": {"const": 1},
+            "then": {"enum": [1]},
+            "not": {"const": 1}
+        });
+        let err = normalize(&json!("1"), &branch).expect_err("then");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let kept = normalize(&json!("2"), &branch).expect("miss");
+        assert_eq!(kept.value, "2");
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn applicator_accepts_only_when_properties_and_required_hold() {
         let schema = json!({
             "if": {
