@@ -161,26 +161,50 @@ fn is_blank_input(raw: &str) -> bool {
         .is_empty()
 }
 
-fn schema_type(schema: &Value) -> Option<&str> {
-    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
-        return Some(kind);
+fn schema_types(schema: &Value) -> Vec<&str> {
+    fn names(type_value: &Value) -> Vec<&str> {
+        if let Some(kind) = type_value.as_str() {
+            return vec![kind];
+        }
+        type_value
+            .as_array()
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+    if let Some(type_value) = schema.get("type") {
+        let found = names(type_value);
+        if !found.is_empty() {
+            return found;
+        }
     }
     schema
         .get("parameters")
         .and_then(|params| params.get("type"))
-        .and_then(Value::as_str)
+        .map(names)
+        .unwrap_or_default()
 }
 
 /// Blank tool arguments are an empty object or an empty array.
-/// A string, number, or boolean is not invented.
+/// A string, number, or boolean is not invented. A union of object and
+/// array is not guessed.
 fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
     let Some(schema) = schema else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
-    match schema_type(schema) {
-        None | Some("object") => Ok(Value::Object(serde_json::Map::new())),
-        Some("array") => Ok(Value::Array(Vec::new())),
-        _ => Err(RepairError::Unfixable(
+    let types = schema_types(schema);
+    if types.is_empty() {
+        return Ok(Value::Object(serde_json::Map::new()));
+    }
+    let object = types.contains(&"object");
+    let array = types.contains(&"array");
+    match (object, array) {
+        (true, false) => Ok(Value::Object(serde_json::Map::new())),
+        (false, true) => Ok(Value::Array(Vec::new())),
+        (true, true) => Err(RepairError::Ambiguous(
+            "blank input matches both an object and an array".into(),
+        )),
+        (false, false) if types.iter().all(|ty| *ty == "null") => Ok(Value::Null),
+        (false, false) => Err(RepairError::Unfixable(
             "blank input does not match the schema type".into(),
         )),
     }
@@ -615,6 +639,27 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, RepairError::Unfixable(_)), "{err:?}");
+
+        let either = json!({"type": ["object", "array"]});
+        let err = repair_args(&RepairRequest {
+            tool_name: "box",
+            raw: "",
+            schema: Some(&either),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, RepairError::Ambiguous(ref reason) if reason.contains("box")),
+            "{err:?}"
+        );
+
+        let array_or_null = json!({"type": ["array", "null"]});
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "list",
+            raw: "",
+            schema: Some(&array_or_null),
+        })
+        .expect("array or null");
+        assert_eq!(repaired.value, json!([]));
     }
 
     #[test]
