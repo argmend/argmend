@@ -678,8 +678,16 @@ pub(crate) fn insert_missing_colons(s: &str) -> String {
             continue;
         }
         if number_at(&chars, index) {
+            let start = index;
+            let keyish = colon_keyish(&stack);
             index = copy_number(&chars, index, &mut out);
-            finish_colon_value(&mut stack);
+            let token: String = chars[start..index].iter().collect();
+            if keyish && plain_integer_key(&token) && colon_needed(&chars, index) {
+                out.push(':');
+                set_colon_mode(&mut stack, ColonMode::Value);
+            } else {
+                finish_colon_value(&mut stack);
+            }
             continue;
         }
         out.push(ch);
@@ -720,6 +728,14 @@ fn finish_colon_value(stack: &mut [ColonNest]) {
     {
         *slot = ColonMode::After;
     }
+}
+
+fn plain_integer_key(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    token == "0" || !token.starts_with('0')
 }
 
 fn colon_needed(chars: &[char], index: usize) -> bool {
@@ -2802,6 +2818,34 @@ mod tests {
         assert!(matches!(
             repair_tool_call_json("{a: true}"),
             RepairOutcome::Repaired { .. }
+        ));
+    }
+
+    #[test]
+    fn numeric_key_without_a_colon_is_quoted() {
+        match repair_tool_call_json("{123 1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["123"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{0 true}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["0"], true),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{123 café}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["123"], "café"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{01 1}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{1.5 2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{123}"),
+            RepairOutcome::Unfixable(_)
         ));
     }
 
