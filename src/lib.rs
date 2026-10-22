@@ -1337,6 +1337,69 @@ mod tests {
     }
 
     #[test]
+    fn contains_rejects_a_coercion_that_drops_the_match() {
+        let dropped = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": "1"}
+        });
+        let err = normalize(&json!(["1"]), &dropped).expect_err("dropped");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let made = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": 1}
+        });
+        let repaired = normalize(&json!(["1"]), &made).expect("made");
+        assert_eq!(repaired.value, json!([1]));
+        let already = normalize(&json!([1]), &made).expect("already");
+        assert_eq!(already.value, json!([1]));
+        assert!(already.rewrites.is_empty());
+
+        let capped = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": 1},
+            "maxContains": 1
+        });
+        let err = normalize(&json!(["1", "1"]), &capped).expect_err("two");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!(["1", "2"]), &capped).expect("one");
+        assert_eq!(repaired.value, json!([1, 2]));
+
+        let at_least = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": 1},
+            "minContains": 2
+        });
+        let err = normalize(&json!(["1", "2"]), &at_least).expect_err("need two");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!(["1", "1"]), &at_least).expect("two ones");
+        assert_eq!(repaired.value, json!([1, 1]));
+
+        let optional = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": 1},
+            "minContains": 0
+        });
+        let repaired = normalize(&json!(["2"]), &optional).expect("optional");
+        assert_eq!(repaired.value, json!([2]));
+
+        let branches = json!({
+            "allOf": [
+                {"items": {"type": "integer"}},
+                {"contains": {"const": "1"}}
+            ]
+        });
+        let kept = normalize(&json!(["1"]), &branches).expect("allof");
+        assert_eq!(kept.value, json!(["1"]));
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn applicator_honors_a_constraint_on_every_branch() {
         let bounds = json!({
             "allOf": [{"type": "integer"}, {"minimum": 0}]
