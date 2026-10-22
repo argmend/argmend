@@ -846,6 +846,25 @@ mod tests {
     }
 
     #[test]
+    fn dollar_ref_key_is_quoted() {
+        match repair_json(r##"{$ref: "#/defs/a", file: "a.rs"}"##) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["$ref"], "#/defs/a");
+                assert_eq!(value["file"], "a.rs");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json(r##"{"$ref": "#/defs/a"}"##),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{file: $ref}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn single_quoted_url_is_not_cut_at_the_slashes() {
         match repair_json("{'url': 'http://example.com/a'}") {
             RepairOutcome::Repaired { value, .. } => {

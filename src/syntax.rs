@@ -221,9 +221,11 @@ pub(crate) fn quote_bare_keys(s: &str) -> String {
                     i += 1;
                 }
             }
-            c if c.is_ascii_alphabetic() || c == '_' => {
-                // Collect the identifier.
+            c if c == '$' || c.is_ascii_alphabetic() || c == '_' => {
+                // Collect the identifier. `$` is only a leading character,
+                // so `$ref` is one key and `a$b` is not.
                 let start = i;
+                i += 1;
                 while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
