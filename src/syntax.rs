@@ -796,25 +796,23 @@ pub(crate) fn quote_bare_keys(s: &str) -> String {
                     out.push_str(&token);
                 }
             }
-            c if c == '$' || c.is_ascii_alphabetic() || c == '_' => {
+            c if c == '$' || c.is_alphabetic() || c == '_' => {
                 // Collect the identifier. `$` is only a leading character,
                 // so `$ref` is one key and `a$b` is not.
                 let start = i;
                 i += 1;
-                while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 let mut hyphenated = i;
                 loop {
                     if hyphenated + 1 < len
                         && (chars[hyphenated] == '-' || chars[hyphenated] == '.')
-                        && (chars[hyphenated + 1].is_ascii_alphanumeric()
-                            || chars[hyphenated + 1] == '_')
+                        && (chars[hyphenated + 1].is_alphanumeric() || chars[hyphenated + 1] == '_')
                     {
                         hyphenated += 1;
                         while hyphenated < len
-                            && (chars[hyphenated].is_ascii_alphanumeric()
-                                || chars[hyphenated] == '_')
+                            && (chars[hyphenated].is_alphanumeric() || chars[hyphenated] == '_')
                         {
                             hyphenated += 1;
                         }
@@ -1449,22 +1447,22 @@ pub(crate) fn quote_bare_values(s: &str) -> String {
 }
 
 fn starts_bare_word(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
+    ch.is_alphabetic() || ch == '_'
 }
 
 fn bare_word_end(chars: &[char], start: usize) -> usize {
     let mut index = start + 1;
     let len = chars.len();
-    while index < len && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+    while index < len && (chars[index].is_alphanumeric() || chars[index] == '_') {
         index += 1;
     }
     loop {
         if index + 1 < len
             && (chars[index] == '-' || chars[index] == '.')
-            && (chars[index + 1].is_ascii_alphanumeric() || chars[index + 1] == '_')
+            && (chars[index + 1].is_alphanumeric() || chars[index + 1] == '_')
         {
             index += 1;
-            while index < len && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+            while index < len && (chars[index].is_alphanumeric() || chars[index] == '_') {
                 index += 1;
             }
         } else {
@@ -2785,6 +2783,26 @@ mod tests {
         let s = r#"{'key': 'say "hi"'}"#;
         let out = fix_single_quotes(s);
         assert_eq!(out, r#"{"key": "say \"hi\""}"#);
+    }
+
+    #[test]
+    fn unicode_bare_words_are_quoted() {
+        match repair_tool_call_json("{café: 1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["café"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{name: café}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["name"], "café"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"café": 1}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: true}"),
+            RepairOutcome::Repaired { .. }
+        ));
     }
 
     #[test]
