@@ -906,6 +906,28 @@ mod tests {
     }
 
     #[test]
+    fn numeric_underscores_are_removed_outside_strings() {
+        match repair_json("{a: 1_000, b: 2.5_0}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1000);
+                assert_eq!(value["b"], 2.5);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{a: 1__0}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{"a": "1_000"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        let schema = json!({"type": "object", "properties": {"n": {"type": "integer"}}});
+        let repaired = normalize(&json!({"n": "1_000"}), &schema).expect("coerce");
+        assert_eq!(repaired.value["n"], 1000);
+    }
+
+    #[test]
     fn hyphenated_bare_key_is_quoted() {
         match repair_json(r#"{file-path: "a.rs"}"#) {
             RepairOutcome::Repaired { value, .. } => {

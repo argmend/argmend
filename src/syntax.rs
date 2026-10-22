@@ -54,6 +54,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = strip_numeric_underscores(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("stripped underscores in numbers"));
+        text = cleaned;
+    }
+
     let cleaned = fix_triple_quotes(&text);
     if cleaned != text {
         repairs.push(syntax_note(
@@ -387,6 +393,52 @@ pub(crate) fn replace_python_literals(s: &str) -> String {
                 i += 1;
             }
         }
+    }
+    out
+}
+
+/// Drop `_` between digits outside strings. `1__0` is left alone.
+pub(crate) fn strip_numeric_underscores(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '"' {
+            out.push('"');
+            i += 1;
+            while i < len && chars[i] != '"' {
+                if chars[i] == '\\' {
+                    out.push(chars[i]);
+                    i += 1;
+                    if i < len {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                } else {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+            }
+            if i < len {
+                out.push('"');
+                i += 1;
+            }
+            continue;
+        }
+        if chars[i] == '_'
+            && out
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_digit())
+            && i + 1 < len
+            && chars[i + 1].is_ascii_digit()
+        {
+            i += 1;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
     }
     out
 }
