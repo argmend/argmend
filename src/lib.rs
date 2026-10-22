@@ -161,12 +161,37 @@ fn is_blank_input(raw: &str) -> bool {
         .is_empty()
 }
 
+fn schema_type(schema: &Value) -> Option<&str> {
+    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
+        return Some(kind);
+    }
+    schema
+        .get("parameters")
+        .and_then(|params| params.get("type"))
+        .and_then(Value::as_str)
+}
+
+/// Blank tool arguments are an empty object or an empty array.
+/// A string, number, or boolean is not invented.
+fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
+    let Some(schema) = schema else {
+        return Ok(Value::Object(serde_json::Map::new()));
+    };
+    match schema_type(schema) {
+        None | Some("object") => Ok(Value::Object(serde_json::Map::new())),
+        Some("array") => Ok(Value::Array(Vec::new())),
+        _ => Err(RepairError::Unfixable(
+            "blank input does not match the schema type".into(),
+        )),
+    }
+}
+
 /// Parse `raw`, then apply [`normalize`] when a schema is present.
 ///
 /// Empty input is `{}`.
 pub fn repair_args(request: &RepairRequest<'_>) -> Result<Repaired, RepairError> {
     if is_blank_input(request.raw) {
-        let value = Value::Object(serde_json::Map::new());
+        let value = blank_value(request.schema).map_err(|err| named(request.tool_name, err))?;
         let mut repaired = Repaired {
             value,
             rewrites: vec![Rewrite {
@@ -470,6 +495,45 @@ mod tests {
         .expect("valid");
         assert!(repaired.rewrites.is_empty());
         assert_eq!(repaired.value["path"], "a.rs");
+    }
+
+    #[test]
+    fn blank_input_follows_the_schema_type() {
+        let array = json!({"type": "array", "items": {"type": "string"}});
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "list",
+            raw: " \n",
+            schema: Some(&array),
+        })
+        .expect("array");
+        assert_eq!(repaired.value, json!([]));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::Empty)
+        );
+
+        let text = json!({"type": "string"});
+        let err = repair_args(&RepairRequest {
+            tool_name: "echo",
+            raw: "",
+            schema: Some(&text),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, RepairError::Unfixable(ref reason) if reason.contains("echo")),
+            "{err:?}"
+        );
+
+        let number = json!({"type": "integer"});
+        let err = repair_args(&RepairRequest {
+            tool_name: "count",
+            raw: "\u{feff}",
+            schema: Some(&number),
+        })
+        .unwrap_err();
+        assert!(matches!(err, RepairError::Unfixable(_)), "{err:?}");
     }
 
     #[test]
