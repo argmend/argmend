@@ -45,6 +45,11 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value misses contains".into(),
             ));
         }
+        if outside_const_or_enum(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value is not a const or enum member".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -57,6 +62,9 @@ fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
         return Ok((next, rewrites));
     }
     if let Some((next, rewrites)) = exclusive_branch(value, schema) {
+        return Ok((next, rewrites));
+    }
+    if let Some((next, rewrites)) = deep_constrained(value, schema) {
         return Ok((next, rewrites));
     }
     let mut rewrites = Vec::new();
@@ -769,6 +777,91 @@ fn schema_type_names(schema: &Value) -> Vec<&str> {
         Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     }
+}
+
+/// An object or array becomes the one `const` or `enum` member it can reach.
+/// Two reachable members are left unchanged.
+fn deep_constrained(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
+    if !value.is_object() && !value.is_array() {
+        return None;
+    }
+    let targets = constrained_values(schema)?;
+    let mut matched = Vec::new();
+    for target in targets {
+        if let Some((next, rewrites)) = coerce_toward(value, target, schema)
+            && &next == target
+        {
+            matched.push((next, rewrites));
+        }
+    }
+    if matched.len() != 1 {
+        return None;
+    }
+    let (next, rewrites) = matched.pop()?;
+    if &next == value && rewrites.is_empty() {
+        return None;
+    }
+    Some((next, rewrites))
+}
+
+fn coerce_toward(value: &Value, target: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
+    if value == target {
+        return Some((value.clone(), Vec::new()));
+    }
+    match (value, target) {
+        (Value::Array(items), Value::Array(targets)) => {
+            if items.len() != targets.len() {
+                return None;
+            }
+            let mut out = Vec::with_capacity(items.len());
+            let mut rewrites = Vec::new();
+            for (item, target_item) in items.iter().zip(targets) {
+                let (next, more) = coerce_toward(item, target_item, schema)?;
+                rewrites.extend(more);
+                out.push(next);
+            }
+            Some((Value::Array(out), rewrites))
+        }
+        (Value::Object(obj), Value::Object(target_obj)) => {
+            if obj.len() != target_obj.len() {
+                return None;
+            }
+            let mut out = Map::new();
+            let mut rewrites = Vec::new();
+            for (key, target_child) in target_obj {
+                let child = obj.get(key)?;
+                let (next, more) = coerce_toward(child, target_child, schema)?;
+                rewrites.extend(more);
+                out.insert(key.clone(), next);
+            }
+            Some((Value::Object(out), rewrites))
+        }
+        (Value::String(text), _) => {
+            let text = text.trim_matches(char::is_whitespace);
+            if text.is_empty() || !string_matches_target(text, target) {
+                return None;
+            }
+            let mut rewrites = Vec::new();
+            record_constrained(text, target, schema, &mut rewrites);
+            Some((target.clone(), rewrites))
+        }
+        _ => None,
+    }
+}
+
+fn outside_const_or_enum(schema: &Value, value: &Value) -> bool {
+    if let Some(const_value) = schema.get("const")
+        && const_value != value
+        && !values_equivalent(const_value, value)
+    {
+        return true;
+    }
+    if let Some(items) = schema.get("enum").and_then(Value::as_array) {
+        return !items
+            .iter()
+            .any(|item| item == value || values_equivalent(item, value));
+    }
+    false
 }
 
 fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
