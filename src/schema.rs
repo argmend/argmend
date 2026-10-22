@@ -20,12 +20,17 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let mut rewrites = Vec::new();
     let coerced = coerce(value, schema, &mut rewrites);
-    if let Some(props) = object_properties(schema)
-        && let Some(obj) = coerced.as_object()
-    {
-        let (next, more) = normalize_object(obj, schema, props)?;
-        rewrites.extend(more);
-        return Ok((next, rewrites));
+    if let Some(obj) = coerced.as_object() {
+        // No `properties` map and `additionalProperties: false` means every
+        // key is forbidden. An empty map is that case, not "skip the object".
+        let props = object_properties(schema);
+        if props.is_some() || denies_unknown(schema) {
+            let empty = Map::new();
+            let props = props.unwrap_or(&empty);
+            let (next, more) = normalize_object(obj, schema, props)?;
+            rewrites.extend(more);
+            return Ok((next, rewrites));
+        }
     }
     if schema.get("type").and_then(Value::as_str) == Some("array")
         && let Some(items) = schema.get("items")
