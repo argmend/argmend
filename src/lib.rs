@@ -755,6 +755,61 @@ mod tests {
     }
 
     #[test]
+    fn additional_property_schema_coerces_unknown_values() {
+        let schema = json!({
+            "additionalProperties": {"type": "integer"}
+        });
+        let repaired = normalize(&json!({"n": "1", "m": "2"}), &schema).expect("coerce");
+        assert_eq!(repaired.value["n"], 1);
+        assert_eq!(repaired.value["m"], 2);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail.contains("integer"))
+        );
+
+        let mixed = json!({
+            "properties": {"flag": {"type": "boolean"}},
+            "additionalProperties": {"type": "integer"}
+        });
+        let repaired = normalize(&json!({"flag": "true", "n": "3"}), &mixed).expect("coerce");
+        assert_eq!(repaired.value["flag"], true);
+        assert_eq!(repaired.value["n"], 3);
+
+        let nested = json!({
+            "additionalProperties": {
+                "type": "object",
+                "properties": {"n": {"type": "integer"}}
+            }
+        });
+        let repaired = normalize(&json!({"child": {"n": "4"}}), &nested).expect("coerce");
+        assert_eq!(repaired.value["child"]["n"], 4);
+
+        let kept = normalize(&json!({"n": "hello"}), &schema).expect("keep");
+        assert_eq!(kept.value["n"], "hello");
+        assert!(kept.rewrites.is_empty());
+
+        let parameters = json!({
+            "parameters": {"additionalProperties": {"type": "integer"}}
+        });
+        let repaired = normalize(&json!({"n": "8"}), &parameters).expect("parameters");
+        assert_eq!(repaired.value["n"], 8);
+
+        let open = json!({"additionalProperties": true});
+        let repaired = normalize(&json!({"n": "1"}), &open).expect("open");
+        assert_eq!(repaired.value["n"], "1");
+        assert!(repaired.rewrites.is_empty());
+
+        let patterned = json!({
+            "additionalProperties": {"type": "integer"},
+            "patternProperties": {"^x-": {"type": "string"}}
+        });
+        let err = normalize(&json!({"x-note": "1"}), &patterned).unwrap_err();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn pattern_properties_are_not_dropped() {
         let schema = json!({
             "type": "object",

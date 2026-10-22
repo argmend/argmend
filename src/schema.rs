@@ -24,7 +24,10 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
         // No `properties` map and `additionalProperties: false` means every
         // key is forbidden. An empty map is that case, not "skip the object".
         let props = object_properties(schema);
-        if props.is_some() || denies_unknown(schema) {
+        if props.is_some()
+            || denies_unknown(schema)
+            || additional_properties_schema(schema).is_some()
+        {
             let empty = Map::new();
             let props = props.unwrap_or(&empty);
             let (next, more) = normalize_object(obj, schema, props)?;
@@ -183,6 +186,18 @@ fn normalize_object(
                 )));
             }
         }
+    } else if let Some(extra) = additional_properties_schema(schema) {
+        if !unknown.is_empty() && has_pattern_properties(schema) {
+            let key = &unknown[0].0;
+            return Err(RepairError::Ambiguous(format!(
+                "unknown key '{key}' may be allowed by patternProperties"
+            )));
+        }
+        for (key, val) in unknown {
+            let (next, more) = normalize_child(&val, extra)?;
+            rewrites.extend(more);
+            out.insert(key, next);
+        }
     } else {
         for (key, val) in unknown {
             out.insert(key, val);
@@ -231,6 +246,17 @@ fn has_pattern_properties(schema: &Value) -> bool {
             .is_some_and(|patterns| !patterns.is_empty())
     }
     nonempty(schema) || schema.get("parameters").is_some_and(nonempty)
+}
+
+fn additional_properties_schema(schema: &Value) -> Option<&Value> {
+    let schema = if schema.get("properties").is_none() {
+        schema.get("parameters").unwrap_or(schema)
+    } else {
+        schema
+    };
+    schema
+        .get("additionalProperties")
+        .filter(|value| value.is_object())
 }
 
 fn denies_unknown(schema: &Value) -> bool {
