@@ -512,8 +512,35 @@ fn violates_property_names(schema: &Value, value: &Value) -> bool {
     else {
         return false;
     };
+    if names_schema_is_partial(names) {
+        return !obj.is_empty();
+    }
     obj.keys()
         .any(|key| !branch_accepts(names, &Value::String(key.clone())))
+}
+
+/// `pattern` and `format` need a matcher this crate does not have.
+/// Any other unchecked keyword is the same: do not guess that a name fits.
+fn names_schema_is_partial(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        return false;
+    };
+    map.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "type"
+                | "const"
+                | "enum"
+                | "minLength"
+                | "maxLength"
+                | "not"
+                | "minimum"
+                | "maximum"
+                | "exclusiveMinimum"
+                | "exclusiveMaximum"
+                | "multipleOf"
+        )
+    })
 }
 
 /// `dependentRequired`, and the array form of `dependencies`.

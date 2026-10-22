@@ -1414,6 +1414,29 @@ mod tests {
     }
 
     #[test]
+    fn property_names_with_a_pattern_are_not_guessed() {
+        let schema = json!({
+            "additionalProperties": {"type": "integer"},
+            "propertyNames": {"pattern": "^.$"}
+        });
+        let err = normalize(&json!({"ab": "1"}), &schema).expect_err("long");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let err = normalize(&json!({"a": "1"}), &schema).expect_err("short");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let already = normalize(&json!({"ab": 1}), &schema).expect("already");
+        assert_eq!(already.value["ab"], 1);
+        assert!(already.rewrites.is_empty());
+
+        let format_schema = json!({
+            "additionalProperties": {"type": "integer"},
+            "propertyNames": {"format": "uuid"}
+        });
+        let err = normalize(&json!({"a": "1"}), &format_schema).expect_err("format");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn size_limits_reject_a_coercion_past_the_bound() {
         let props = json!({
             "properties": {
