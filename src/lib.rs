@@ -780,6 +780,24 @@ mod tests {
     }
 
     #[test]
+    fn hash_comment_is_stripped_outside_strings() {
+        match repair_json("{a: 1} # tail") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{a: \"hash # stay\",}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "hash # stay");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json(r#"{"a": "hash # stay"}"#),
+            RepairOutcome::Valid(_)
+        ));
+    }
+
+    #[test]
     fn single_quoted_url_is_not_cut_at_the_slashes() {
         match repair_json("{'url': 'http://example.com/a'}") {
             RepairOutcome::Repaired { value, .. } => {

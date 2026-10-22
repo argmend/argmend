@@ -476,11 +476,11 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
     out
 }
 
-/// Strip `//` line comments and `/* ... */` block comments.
+/// Strip `//` and `#` line comments and `/* ... */` block comments.
 ///
 /// Single-quoted strings are skipped, same as double-quoted strings.
 /// Quote repair runs after this stage, so `//` inside `'http://example.com'`
-/// is part of the value.
+/// is part of the value. A `#` inside a string is also kept.
 pub(crate) fn strip_json_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -508,6 +508,12 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                 }
                 if i < len {
                     out.push(quote);
+                    i += 1;
+                }
+            }
+            '#' => {
+                i += 1;
+                while i < len && chars[i] != '\n' {
                     i += 1;
                 }
             }
