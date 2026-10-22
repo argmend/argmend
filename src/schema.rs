@@ -18,6 +18,9 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 }
 
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if let Some((next, rewrites)) = if_then_else(value, schema) {
+        return Ok((next, rewrites));
+    }
     if let Some((next, rewrites)) = all_of(value, schema) {
         return Ok((next, rewrites));
     }
@@ -56,6 +59,51 @@ enum ArrayTail<'a> {
     Keep,
     Forbid,
     Schema(&'a Value),
+}
+
+/// When `if` matches, apply `then`. Otherwise apply `else`.
+/// The `then` result must still match `if`.
+fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
+    if schema.get("allOf").is_some()
+        || schema.get("oneOf").is_some()
+        || schema.get("anyOf").is_some()
+    {
+        return None;
+    }
+    let if_schema = schema.get("if")?;
+    let then_schema = schema.get("then");
+    let else_schema = schema.get("else");
+    if then_schema.is_none() && else_schema.is_none() {
+        return None;
+    }
+    let (probed, probe_rewrites) = normalize_child(value, if_schema).ok()?;
+    if constraints_hold(if_schema, &probed) {
+        let Some(then_schema) = then_schema else {
+            if probed == *value && probe_rewrites.is_empty() {
+                return None;
+            }
+            return Some((probed, probe_rewrites));
+        };
+        let (next, more) = normalize_child(&probed, then_schema).ok()?;
+        if !constraints_hold(if_schema, &next) || !constraints_hold(then_schema, &next) {
+            return None;
+        }
+        let mut rewrites = probe_rewrites;
+        rewrites.extend(more);
+        if next == *value && rewrites.is_empty() {
+            return None;
+        }
+        return Some((next, rewrites));
+    }
+    let else_schema = else_schema?;
+    let (next, rewrites) = normalize_child(value, else_schema).ok()?;
+    if !constraints_hold(else_schema, &next) {
+        return None;
+    }
+    if next == *value && rewrites.is_empty() {
+        return None;
+    }
+    Some((next, rewrites))
 }
 
 /// Apply every `allOf` branch. The result must still satisfy each branch.
