@@ -776,6 +776,26 @@ pub(crate) fn quote_bare_keys(s: &str) -> String {
                     i += 1;
                 }
             }
+            c if c.is_ascii_digit() => {
+                let start = i;
+                i += 1;
+                while i < len && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let token: String = chars[start..i].iter().collect();
+                let mut j = i;
+                while j < len && chars[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let plain = token == "0" || !token.starts_with('0');
+                if plain && j < len && chars[j] == ':' {
+                    out.push('"');
+                    out.push_str(&token);
+                    out.push('"');
+                } else {
+                    out.push_str(&token);
+                }
+            }
             c if c == '$' || c.is_ascii_alphabetic() || c == '_' => {
                 // Collect the identifier. `$` is only a leading character,
                 // so `$ref` is one key and `a$b` is not.
@@ -2765,6 +2785,43 @@ mod tests {
         let s = r#"{'key': 'say "hi"'}"#;
         let out = fix_single_quotes(s);
         assert_eq!(out, r#"{"key": "say \"hi\""}"#);
+    }
+
+    #[test]
+    fn numeric_bare_keys_are_quoted() {
+        match repair_tool_call_json("{123: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["123"], 1);
+                assert!(value["123"].is_number());
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{0: true, 10: 2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["0"], true);
+                assert_eq!(value["10"], 2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{123=>1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["123"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: 10}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 10);
+                assert!(value["a"].is_number());
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{01: 1}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"123": 1}"#),
+            RepairOutcome::Valid(_)
+        ));
     }
 
     #[test]
