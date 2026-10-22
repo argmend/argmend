@@ -808,6 +808,9 @@ fn coerce_toward(value: &Value, target: &Value, schema: &Value) -> Option<(Value
     if value == target {
         return Some((value.clone(), Vec::new()));
     }
+    if let Some(pair) = exact_float_toward(value, target, schema) {
+        return Some(pair);
+    }
     match (value, target) {
         (Value::Array(items), Value::Array(targets)) => {
             if items.len() != targets.len() {
@@ -847,6 +850,35 @@ fn coerce_toward(value: &Value, target: &Value, schema: &Value) -> Option<(Value
         }
         _ => None,
     }
+}
+
+/// `1.0` reaches integer `1` inside an object or array member.
+/// A float that is already one of the members is left unchanged.
+fn exact_float_toward(
+    value: &Value,
+    target: &Value,
+    schema: &Value,
+) -> Option<(Value, Vec<Rewrite>)> {
+    let left = value.as_number()?;
+    let right = target.as_number()?;
+    if !numbers_equal(left, right) {
+        return None;
+    }
+    let shown = value.as_f64()?;
+    if !shown.is_finite() || shown.fract() != 0.0 || shown.abs() > (1u64 << 53) as f64 {
+        return None;
+    }
+    let word = if schema.get("const").is_some() {
+        "const"
+    } else {
+        "enum"
+    };
+    let mut rewrites = Vec::new();
+    rewrites.push(rewrite(
+        RewriteKind::NumberString,
+        format!("{word} number {shown:?}"),
+    ));
+    Some((target.clone(), rewrites))
 }
 
 fn outside_const_or_enum(schema: &Value, value: &Value) -> bool {
