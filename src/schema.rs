@@ -33,14 +33,27 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
         // No `properties` map and `additionalProperties: false` means every
         // key is forbidden. An empty map is that case, not "skip the object".
         let props = object_properties(schema);
+        let mut next = coerced.clone();
+        let mut saw_object_schema = false;
         if props.is_some()
             || denies_unknown(schema)
             || additional_properties_schema(schema).is_some()
         {
             let empty = Map::new();
             let props = props.unwrap_or(&empty);
-            let (next, more) = normalize_object(obj, schema, props)?;
+            let (normalized, more) = normalize_object(obj, schema, props)?;
             rewrites.extend(more);
+            next = normalized;
+            saw_object_schema = true;
+        }
+        if let Some((updated, extra)) = next
+            .as_object()
+            .and_then(|map| apply_dependent_schemas(map, schema))
+        {
+            rewrites.extend(extra);
+            return Ok((updated, rewrites));
+        }
+        if saw_object_schema {
             return Ok((next, rewrites));
         }
     }
@@ -59,6 +72,62 @@ enum ArrayTail<'a> {
     Keep,
     Forbid,
     Schema(&'a Value),
+}
+
+/// A present property applies its `dependentSchemas` or schema-form
+/// `dependencies` entry. An array of required names is not invented.
+fn apply_dependent_schemas(
+    obj: &Map<String, Value>,
+    schema: &Value,
+) -> Option<(Value, Vec<Rewrite>)> {
+    let active = dependent_object_schemas(schema)
+        .into_iter()
+        .filter(|(name, _)| obj.contains_key(*name))
+        .map(|(_, sub)| sub)
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        return None;
+    }
+    let mut current = Value::Object(obj.clone());
+    let mut rewrites = Vec::new();
+    for branch in &active {
+        let (next, more) = normalize_child(&current, branch).ok()?;
+        if !branch_accepts(branch, &next) {
+            return None;
+        }
+        current = next;
+        rewrites.extend(more);
+    }
+    for branch in &active {
+        let (next, _) = normalize_child(&current, branch).ok()?;
+        if next != current || !branch_accepts(branch, &next) {
+            return None;
+        }
+    }
+    if current == Value::Object(obj.clone()) && rewrites.is_empty() {
+        return None;
+    }
+    Some((current, rewrites))
+}
+
+fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
+    let schema = if schema.get("properties").is_none() {
+        schema.get("parameters").unwrap_or(schema)
+    } else {
+        schema
+    };
+    let mut out = Vec::new();
+    for keyword in ["dependentSchemas", "dependencies"] {
+        let Some(map) = schema.get(keyword).and_then(Value::as_object) else {
+            continue;
+        };
+        for (name, sub) in map {
+            if sub.is_object() {
+                out.push((name.as_str(), sub));
+            }
+        }
+    }
+    out
 }
 
 /// When `if` matches, apply `then`. Otherwise apply `else`.
@@ -162,6 +231,23 @@ fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite
     } else {
         None
     }
+}
+
+fn branch_accepts(schema: &Value, value: &Value) -> bool {
+    constraints_hold(schema, value) && properties_match(schema, value)
+}
+
+fn properties_match(schema: &Value, value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return true;
+    };
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return true;
+    };
+    props.iter().all(|(key, prop_schema)| {
+        obj.get(key)
+            .is_none_or(|child| constraints_hold(prop_schema, child))
+    })
 }
 
 fn constraints_hold(schema: &Value, value: &Value) -> bool {
