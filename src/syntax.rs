@@ -82,6 +82,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = fill_trailing_decimal_dot(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("filled a trailing decimal dot"));
+        text = cleaned;
+    }
+
     let cleaned = fix_triple_quotes(&text);
     if cleaned != text {
         repairs.push(syntax_note(
@@ -723,6 +729,53 @@ pub(crate) fn escape_controls_in_strings(s: &str) -> String {
     out
 }
 
+/// `1.` outside a string becomes `1.0`. `.5` and `1.e2` stay unchanged.
+pub(crate) fn fill_trailing_decimal_dot(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len() + 4);
+    let mut index = 0;
+    while index < len {
+        if chars[index] == '"' {
+            out.push('"');
+            index += 1;
+            while index < len && chars[index] != '"' {
+                if chars[index] == '\\' {
+                    out.push('\\');
+                    index += 1;
+                    if index < len {
+                        out.push(chars[index]);
+                        index += 1;
+                    }
+                } else {
+                    out.push(chars[index]);
+                    index += 1;
+                }
+            }
+            if index < len {
+                out.push('"');
+                index += 1;
+            }
+            continue;
+        }
+        let prev_digit = index > 0 && chars[index - 1].is_ascii_digit();
+        let at_end = index + 1 == len || is_json_value_end(chars[index + 1]);
+        if chars[index] == '.' && prev_digit && at_end {
+            out.push('.');
+            out.push('0');
+            index += 1;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn is_json_value_end(ch: char) -> bool {
+    ch.is_ascii_whitespace() || matches!(ch, ',' | ']' | '}')
+}
+
 /// `0x10` outside a string becomes `16`. A value that does not fit in
 /// i64, or a trailing `.`, is left unchanged.
 pub(crate) fn replace_hex_numbers(s: &str) -> String {
@@ -1143,6 +1196,34 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn trailing_decimal_dot_is_filled() {
+        match repair_tool_call_json("{a: 1., b: -2.}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1.0);
+                assert_eq!(value["b"], -2.0);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("decimal dot"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"1."}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: .5}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 1.e2}"),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     #[test]
