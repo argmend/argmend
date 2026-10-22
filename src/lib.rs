@@ -1294,6 +1294,49 @@ mod tests {
     }
 
     #[test]
+    fn dependent_schema_applies_when_the_property_is_present() {
+        let schema = json!({
+            "dependentSchemas": {
+                "flag": {"properties": {"n": {"type": "integer"}}}
+            }
+        });
+        let repaired = normalize(&json!({"flag": true, "n": "1"}), &schema).expect("present");
+        assert_eq!(repaired.value["n"], 1);
+        assert_eq!(repaired.value["flag"], true);
+
+        let kept = normalize(&json!({"n": "1"}), &schema).expect("absent");
+        assert_eq!(kept.value["n"], "1");
+        assert!(kept.rewrites.is_empty());
+
+        let dependencies = json!({
+            "dependencies": {
+                "flag": {"properties": {"n": {"type": "integer"}}}
+            }
+        });
+        let repaired =
+            normalize(&json!({"flag": true, "n": "2"}), &dependencies).expect("dependencies");
+        assert_eq!(repaired.value["n"], 2);
+
+        let names = json!({
+            "dependencies": {"flag": ["n"]}
+        });
+        let kept = normalize(&json!({"flag": true}), &names).expect("names");
+        assert!(kept.value.get("n").is_none());
+        assert!(kept.rewrites.is_empty());
+
+        let clash = json!({
+            "dependentSchemas": {
+                "flag": {"properties": {"n": {"type": "integer"}}},
+                "other": {"properties": {"n": {"type": "boolean"}}}
+            }
+        });
+        let kept =
+            normalize(&json!({"flag": true, "other": true, "n": "1"}), &clash).expect("clash");
+        assert_eq!(kept.value["n"], "1");
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn if_then_else_follows_the_matching_branch() {
         let schema = json!({
             "if": {"type": "boolean"},
