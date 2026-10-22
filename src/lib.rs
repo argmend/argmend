@@ -1117,6 +1117,29 @@ mod tests {
     }
 
     #[test]
+    fn unicode_space_between_tokens_is_ascii_space() {
+        match repair_json("{\"a\":\u{a0}1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{a:\u{a0}1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("[1,\u{a0}2]") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value, json!([1, 2])),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{\"a\": \"\u{a0}x\", b: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "\u{a0}x");
+                assert_eq!(value["b"], 1);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn blank_unicode_whitespace_follows_the_schema_type() {
         let repaired = repair_args(&RepairRequest {
             tool_name: "edit_file",
