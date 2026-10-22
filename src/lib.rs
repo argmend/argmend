@@ -1388,6 +1388,32 @@ mod tests {
     }
 
     #[test]
+    fn property_names_reject_a_coercion_past_the_length() {
+        let schema = json!({
+            "additionalProperties": {"type": "integer"},
+            "propertyNames": {"maxLength": 1}
+        });
+        let err = normalize(&json!({"ab": "1"}), &schema).expect_err("long");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let repaired = normalize(&json!({"a": "1"}), &schema).expect("short");
+        assert_eq!(repaired.value["a"], 1);
+
+        let already = normalize(&json!({"ab": 1}), &schema).expect("already");
+        assert_eq!(already.value["ab"], 1);
+        assert!(already.rewrites.is_empty());
+
+        let minimum = json!({
+            "additionalProperties": {"type": "integer"},
+            "propertyNames": {"minLength": 2}
+        });
+        let err = normalize(&json!({"a": "1"}), &minimum).expect_err("short name");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!({"ab": "1"}), &minimum).expect("long enough");
+        assert_eq!(repaired.value["ab"], 1);
+    }
+
+    #[test]
     fn size_limits_reject_a_coercion_past_the_bound() {
         let props = json!({
             "properties": {
