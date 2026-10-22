@@ -210,7 +210,7 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
     let Some(text) = value.as_str() else {
         return value.clone();
     };
-    let text = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    let text = text.trim_matches(char::is_whitespace);
     if text.is_empty() {
         return value.clone();
     }

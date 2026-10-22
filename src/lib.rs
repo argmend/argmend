@@ -84,12 +84,19 @@ pub fn repair_json(raw: &str) -> RepairOutcome {
 }
 
 fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
-    let (raw, mut prefix) = match without_leading_bom(raw) {
+    let (raw, mut prefix) = match without_edge_unicode_whitespace(raw) {
         Some(rest) => (
             rest,
-            vec![note(RewriteKind::Syntax, "stripped leading BOM")],
+            vec![note(RewriteKind::Syntax, "stripped surrounding whitespace")],
         ),
         None => (raw, Vec::new()),
+    };
+    let raw = match without_leading_bom(raw) {
+        Some(rest) => {
+            prefix.push(note(RewriteKind::Syntax, "stripped leading BOM"));
+            rest
+        }
+        None => raw,
     };
     if let Ok(value) = serde_json::from_str(raw) {
         return with_unique_keys(raw, value, prefix);
@@ -143,6 +150,36 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
             "parse failed after all repairs: {parse_error}"
         ))),
     }
+}
+
+/// Non-ASCII whitespace around the document, such as U+00A0.
+/// ASCII whitespace is left in place so a valid document stays Valid.
+fn without_edge_unicode_whitespace(raw: &str) -> Option<&str> {
+    let mut start = 0;
+    let mut end = raw.len();
+    let mut saw_non_ascii = false;
+    for (idx, ch) in raw.char_indices() {
+        if !ch.is_whitespace() {
+            break;
+        }
+        if !ch.is_ascii_whitespace() {
+            saw_non_ascii = true;
+        }
+        start = idx + ch.len_utf8();
+    }
+    for (idx, ch) in raw.char_indices().rev() {
+        if idx < start || !ch.is_whitespace() {
+            break;
+        }
+        if !ch.is_ascii_whitespace() {
+            saw_non_ascii = true;
+        }
+        end = idx;
+    }
+    if !saw_non_ascii {
+        return None;
+    }
+    Some(&raw[start..end])
 }
 
 /// BOM after ASCII whitespace, before the JSON text.
@@ -998,6 +1035,48 @@ mod tests {
         assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
         let repaired = normalize(&json!({"child": {}}), &nested).expect("empty child");
         assert_eq!(repaired.value["child"], json!({}));
+    }
+
+    #[test]
+    fn unicode_nbsp_around_the_document_is_stripped() {
+        let raw = "\u{a0}{\"a\":1}\u{a0}";
+        match repair_json(raw) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("whitespace"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("\n{\"a\":1}") {
+            RepairOutcome::Valid(value) => assert_eq!(value["a"], 1),
+            other => panic!("expected Valid, got {other:?}"),
+        }
+        match repair_json("{\"a\":\"\u{a0}\"}") {
+            RepairOutcome::Valid(value) => assert_eq!(value["a"], "\u{a0}"),
+            other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unicode_nbsp_around_a_typed_string_is_trimmed() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "n": {"type": "integer"}
+            }
+        });
+        let repaired = normalize(
+            &json!({"ok": "\u{a0}true\u{a0}", "n": "\u{a0}01\u{a0}"}),
+            &schema,
+        )
+        .expect("nbsp");
+        assert_eq!(repaired.value["ok"], true);
+        assert_eq!(repaired.value["n"], "\u{a0}01\u{a0}");
     }
 
     #[test]
