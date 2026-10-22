@@ -120,6 +120,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = unwrap_outer_parens(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("unwrapped outer parentheses"));
+        text = cleaned;
+    }
+
     Staged { text, repairs }
 }
 
@@ -955,6 +961,64 @@ pub(crate) fn strip_unary_plus(s: &str) -> String {
     out
 }
 
+/// `({"a":1})` is the object. `(1)(2)` is not one wrap, so it stays.
+pub(crate) fn unwrap_outer_parens(s: &str) -> String {
+    let mut text = s.to_string();
+    for _ in 0..8 {
+        let Some(inner) = one_paren_wrap(&text) else {
+            break;
+        };
+        text = inner;
+    }
+    text
+}
+
+fn one_paren_wrap(s: &str) -> Option<String> {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let mut start = 0;
+    while start < chars.len() && chars[start].1.is_ascii_whitespace() {
+        start += 1;
+    }
+    let mut end = chars.len();
+    while end > start && chars[end - 1].1.is_ascii_whitespace() {
+        end -= 1;
+    }
+    if start >= end || chars[start].1 != '(' {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (idx, (byte, ch)) in chars.iter().enumerate().take(end).skip(start) {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if *ch == '\\' {
+                escape = true;
+            } else if *ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    if idx + 1 != end {
+                        return None;
+                    }
+                    let inner_start = chars[start].0 + '('.len_utf8();
+                    return Some(s[inner_start..*byte].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Drop one trailing `;` after a finished value. `{"a":1};;` is left
 /// alone, and a `;` inside a string is not a suffix.
 pub(crate) fn strip_one_trailing_semicolon(s: &str) -> String {
@@ -1218,6 +1282,45 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn outer_parentheses_are_unwrapped() {
+        match repair_tool_call_json(r#"({"a":1})"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("parentheses"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("({a: 1})") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"(({"a":1}));"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"(")")"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value, ")"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"(1)"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("(1)(2)"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("()"),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     #[test]
