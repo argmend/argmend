@@ -82,6 +82,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = replace_binary_and_octal_numbers(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("replaced binary and octal numbers"));
+        text = cleaned;
+    }
+
     let cleaned = fill_trailing_decimal_dot(&text);
     if cleaned != text {
         repairs.push(syntax_note("filled a trailing decimal dot"));
@@ -1112,7 +1118,81 @@ fn is_number_prefix(ch: char) -> bool {
 }
 
 fn hex_to_decimal(digits: &str, negative: bool) -> Option<String> {
-    let value = u128::from_str_radix(digits, 16).ok()?;
+    radix_to_decimal(digits, 16, negative)
+}
+
+/// `0b1010` becomes 10 and `0o10` becomes 8. A bad digit, a fraction,
+/// or a value that does not fit in i64 is left unchanged.
+pub(crate) fn replace_binary_and_octal_numbers(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut index = 0;
+    while index < len {
+        if chars[index] == '"' {
+            out.push('"');
+            index += 1;
+            while index < len && chars[index] != '"' {
+                if chars[index] == '\\' {
+                    out.push('\\');
+                    index += 1;
+                    if index < len {
+                        out.push(chars[index]);
+                        index += 1;
+                    }
+                } else {
+                    out.push(chars[index]);
+                    index += 1;
+                }
+            }
+            if index < len {
+                out.push('"');
+                index += 1;
+            }
+            continue;
+        }
+        let boundary = index == 0 || !is_number_prefix(chars[index - 1]);
+        let radix = if boundary && chars[index] == '0' && index + 1 < len {
+            match chars[index + 1] {
+                'b' | 'B' => Some(2),
+                'o' | 'O' => Some(8),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(radix) = radix {
+            let mut end = index + 2;
+            while end < len && is_radix_digit(chars[end], radix) {
+                end += 1;
+            }
+            let finished = end == len || (!is_number_prefix(chars[end]) && chars[end] != '.');
+            if end > index + 2 && finished {
+                let digits: String = chars[index + 2..end].iter().collect();
+                let negative = out.ends_with('-');
+                if let Some(decimal) = radix_to_decimal(&digits, radix, negative) {
+                    out.push_str(&decimal);
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn is_radix_digit(ch: char, radix: u32) -> bool {
+    match radix {
+        2 => ch == '0' || ch == '1',
+        8 => matches!(ch, '0'..='7'),
+        _ => false,
+    }
+}
+
+fn radix_to_decimal(digits: &str, radix: u32, negative: bool) -> Option<String> {
+    let value = u128::from_str_radix(digits, radix).ok()?;
     let max = i64::MAX as u128;
     if value > max && !(negative && value == max + 1) {
         return None;
@@ -2402,6 +2482,65 @@ mod tests {
         ));
         assert!(matches!(
             repair_tool_call_json("{a: 1.e2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn binary_and_octal_numbers_become_decimal() {
+        match repair_tool_call_json("{a: 0b1010, b: -0B11, c: 0o10, d: 0O17}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 10);
+                assert_eq!(value["b"], -3);
+                assert_eq!(value["c"], 8);
+                assert_eq!(value["d"], 15);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("binary"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("[0b10, 0o11]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, serde_json::json!([2, 9]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let max = format!("{{a: 0b{}}}", "1".repeat(63));
+        match repair_tool_call_json(&max) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], i64::MAX),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let min = format!("{{a: -0b1{}}}", "0".repeat(63));
+        match repair_tool_call_json(&min) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], i64::MIN),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"0b10"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 0b}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 0b2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 0o8}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 0b10.1}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        let overflow = format!("{{a: 0b1{}}}", "0".repeat(63));
+        assert!(matches!(
+            repair_tool_call_json(&overflow),
             RepairOutcome::Unfixable(_)
         ));
     }
