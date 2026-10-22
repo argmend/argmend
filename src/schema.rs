@@ -273,7 +273,7 @@ fn integer_string(text: &str) -> Option<serde_json::Number> {
     Some(serde_json::Number::from(parsed))
 }
 
-/// `"3.0"` and `"-2.000"` are integers. `"3.10"` and `"03.0"` are not.
+/// `"3.0"`, `"-2.000"`, and `"1."` are integers. `"3.10"` and `"03.0"` are not.
 fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = text.strip_prefix('+').unwrap_or(&text);
@@ -283,7 +283,6 @@ fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     };
     let (whole, frac) = rest.split_once('.')?;
     if whole.is_empty()
-        || frac.is_empty()
         || !frac.bytes().all(|byte| byte == b'0')
         || !is_integer_token(whole)
         || has_leading_zero(whole)
@@ -303,6 +302,9 @@ fn number_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = text.strip_prefix('+').unwrap_or(&text);
     if let Some(number) = integer_string(text) {
+        return Some(number);
+    }
+    if let Some(number) = integer_from_zero_fraction(text) {
         return Some(number);
     }
     if (!is_decimal_token(text) && !is_scientific_token(text)) || has_leading_zero(text) {

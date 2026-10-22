@@ -1247,6 +1247,31 @@ mod tests {
     }
 
     #[test]
+    fn empty_fraction_string_is_an_integer() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer"},
+                "s": {"type": ["integer", "string"]}
+            }
+        });
+        let repaired = normalize(&json!({"n": "1.", "s": "2."}), &schema).expect("empty fraction");
+        assert_eq!(repaired.value["n"], 1);
+        assert_eq!(repaired.value["s"], "2.");
+        let repaired = normalize(&json!({"n": "-2."}), &schema).expect("negative");
+        assert_eq!(repaired.value["n"], -2);
+        let repaired = normalize(&json!({"n": "01."}), &schema).expect("leading zero");
+        assert_eq!(repaired.value["n"], "01.");
+        let repaired = normalize(&json!({"n": "1.e2"}), &schema).expect("scientific");
+        assert_eq!(repaired.value["n"], "1.e2");
+        let number = json!({"type": "object", "properties": {"n": {"type": "number"}}});
+        let repaired = normalize(&json!({"n": "1."}), &number).expect("number");
+        assert_eq!(repaired.value["n"], 1);
+        let repaired = normalize(&json!({"n": ".5"}), &number).expect("leading dot");
+        assert_eq!(repaired.value["n"], ".5");
+    }
+
+    #[test]
     fn null_string_is_coerced_when_the_schema_is_null() {
         let schema = json!({
             "type": "object",
