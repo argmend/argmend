@@ -52,6 +52,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = escape_controls_in_strings(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("escaped controls inside strings"));
+        text = cleaned;
+    }
+
     let cleaned = strip_unary_plus(&text);
     if cleaned != text {
         repairs.push(syntax_note("stripped unary plus"));
@@ -626,6 +632,47 @@ pub(crate) fn replace_python_literals(s: &str) -> String {
     out
 }
 
+/// A raw newline, carriage return, or tab inside a double-quoted string
+/// is content. Outside a string those bytes are whitespace and stay.
+pub(crate) fn escape_controls_in_strings(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut index = 0;
+    while index < len {
+        if chars[index] != '"' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        out.push('"');
+        index += 1;
+        while index < len && chars[index] != '"' {
+            if chars[index] == '\\' {
+                out.push('\\');
+                index += 1;
+                if index < len {
+                    out.push(chars[index]);
+                    index += 1;
+                }
+                continue;
+            }
+            match chars[index] {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other => out.push(other),
+            }
+            index += 1;
+        }
+        if index < len {
+            out.push('"');
+            index += 1;
+        }
+    }
+    out
+}
+
 /// Drop `_` between digits outside strings. `1__0` is left alone.
 pub(crate) fn strip_numeric_underscores(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -938,6 +985,39 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn raw_newline_inside_a_double_quoted_string_is_escaped() {
+        let input = "{\"file\": \"foo\nbar\"}";
+        match repair_tool_call_json(input) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["file"], "foo\nbar");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("escaped"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let input = "{\"file\": \"foo\tbar\r\"}";
+        match repair_tool_call_json(input) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["file"], "foo\tbar\r"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"file":"foo\nbar"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{\n\"file\": 1\n}"),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{\"a\": \"hello\n\"b\": 1}"),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     // ── 6. Block comments ─────────────────────────────────────────────
