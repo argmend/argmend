@@ -114,6 +114,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = strip_one_trailing_semicolon(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("removed a trailing semicolon"));
+        text = cleaned;
+    }
+
     Staged { text, repairs }
 }
 
@@ -949,6 +955,22 @@ pub(crate) fn strip_unary_plus(s: &str) -> String {
     out
 }
 
+/// Drop one trailing `;` after a finished value. `{"a":1};;` is left
+/// alone, and a `;` inside a string is not a suffix.
+pub(crate) fn strip_one_trailing_semicolon(s: &str) -> String {
+    let end = s.trim_end_matches(|ch: char| ch.is_ascii_whitespace());
+    let Some(body) = end.strip_suffix(';') else {
+        return s.to_string();
+    };
+    if body
+        .trim_end_matches(|ch: char| ch.is_ascii_whitespace())
+        .ends_with(';')
+    {
+        return s.to_string();
+    }
+    body.to_string()
+}
+
 /// Remove trailing commas before `]` or `}`.
 pub(crate) fn remove_trailing_commas(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1196,6 +1218,37 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn one_trailing_semicolon_is_removed() {
+        match repair_tool_call_json(r#"{"a":1};"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("semicolon"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a: 1} ;") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":"1;"}"#),
+            RepairOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1};;"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1};{"b":2}"#),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     #[test]
