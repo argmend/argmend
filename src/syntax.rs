@@ -514,7 +514,15 @@ pub(crate) fn replace_key_equals(s: &str) -> String {
         }
         if chars[index] == '=' && key_equals(&chars, index) {
             out.push(':');
-            index += 1;
+            let after = index + 1;
+            if let Some(gt) = next_non_ws(&chars, after)
+                && chars[gt] == '>'
+                && chars.get(gt + 1) != Some(&'=')
+            {
+                index = gt + 1;
+                continue;
+            }
+            index = after;
             continue;
         }
         out.push(chars[index]);
@@ -545,6 +553,14 @@ fn key_equals(chars: &[char], index: usize) -> bool {
 
 fn is_key_predecessor(ch: char) -> bool {
     matches!(ch, '{' | ',' | '"' | '}' | ']') || ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn next_non_ws(chars: &[char], index: usize) -> Option<usize> {
+    let mut next = index;
+    while next < chars.len() && chars[next].is_ascii_whitespace() {
+        next += 1;
+    }
+    if next < chars.len() { Some(next) } else { None }
 }
 
 fn last_non_ws(chars: &[char], index: usize) -> Option<usize> {
@@ -2275,8 +2291,27 @@ mod tests {
             repair_tool_call_json(r#"{"a":"b=c"}"#),
             RepairOutcome::Valid(_)
         ));
+        match repair_tool_call_json("{a=>1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{a => 1, b=>hello}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], "hello");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json(r#"{"a"=>"x"}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "x"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
         assert!(matches!(
             repair_tool_call_json("{a==1}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: b>=1}"),
             RepairOutcome::Unfixable(_)
         ));
         assert!(matches!(
