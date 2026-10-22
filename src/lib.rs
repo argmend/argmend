@@ -656,6 +656,98 @@ mod tests {
     }
 
     #[test]
+    fn property_x_aliases_rename_before_a_closed_object_drops_them() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "x-aliases": ["text", "body", "contents"]
+                },
+                "path": {"type": "string", "x-aliases": ["target"]}
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"path": "a.rs", "text": "hi"}), &schema).expect("text");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "content": "hi"}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "renamed text to content")
+        );
+
+        let repaired = normalize(&json!({"target": "a.rs", "body": "hi"}), &schema).expect("both");
+        assert_eq!(repaired.value["path"], "a.rs");
+        assert_eq!(repaired.value["content"], "hi");
+
+        let unevaluated = json!({
+            "properties": {
+                "content": {"type": "string", "x-aliases": ["text"]},
+                "path": {"type": "string"}
+            },
+            "required": ["path", "content"],
+            "unevaluatedProperties": false
+        });
+        let repaired =
+            normalize(&json!({"path": "a.rs", "text": "hi"}), &unevaluated).expect("unevaluated");
+        assert_eq!(repaired.value["content"], "hi");
+
+        let closed_path = json!({
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        });
+        let err = normalize(&json!({"path": "a.rs", "text": "hi"}), &closed_path).expect("drop");
+        assert_eq!(err.value, json!({"path": "a.rs"}));
+        assert!(
+            err.rewrites
+                .iter()
+                .any(|item| item.detail.contains("dropped"))
+        );
+
+        let err = normalize(&json!({"target": "a.rs"}), &closed_path).expect_err("not global");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+
+        let command = json!({
+            "properties": {
+                "command": {"type": "string", "x-aliases": ["cmd", "shell"]}
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"cmd": "echo hi"}), &command).expect("cmd");
+        assert_eq!(repaired.value["command"], "echo hi");
+
+        let both = json!({
+            "properties": {
+                "content": {"type": "string", "x-aliases": ["text"]},
+                "note": {"type": "string", "x-aliases": ["text"]}
+            }
+        });
+        let err = normalize(&json!({"text": "hi"}), &both).expect_err("two");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+
+        let disagree = json!({
+            "properties": {
+                "content": {"type": "string", "x-aliases": ["text"]}
+            }
+        });
+        let err =
+            normalize(&json!({"content": "a", "text": "b"}), &disagree).expect_err("disagree");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+        let repaired = normalize(&json!({"content": "a", "text": "a"}), &disagree).expect("same");
+        assert_eq!(repaired.value, json!({"content": "a"}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "dropped duplicate alias text")
+        );
+    }
+
+    #[test]
     fn whitespace_around_a_typed_string_is_trimmed() {
         let schema = json!({
             "type": "object",
@@ -1394,7 +1486,10 @@ mod tests {
             "propertyNames": {"maxLength": 1}
         });
         let err = normalize(&json!({"ab": "1"}), &schema).expect_err("long");
-        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "coerced value has a property name outside the schema"
+        );
 
         let repaired = normalize(&json!({"a": "1"}), &schema).expect("short");
         assert_eq!(repaired.value["a"], 1);
@@ -1420,9 +1515,9 @@ mod tests {
             "propertyNames": {"pattern": "^.$"}
         });
         let err = normalize(&json!({"ab": "1"}), &schema).expect_err("long");
-        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        assert_eq!(err.to_string(), "propertyNames pattern was not evaluated");
         let err = normalize(&json!({"a": "1"}), &schema).expect_err("short");
-        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        assert_eq!(err.to_string(), "propertyNames pattern was not evaluated");
 
         let already = normalize(&json!({"ab": 1}), &schema).expect("already");
         assert_eq!(already.value["ab"], 1);
@@ -1433,7 +1528,7 @@ mod tests {
             "propertyNames": {"format": "uuid"}
         });
         let err = normalize(&json!({"a": "1"}), &format_schema).expect_err("format");
-        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        assert_eq!(err.to_string(), "propertyNames format was not evaluated");
     }
 
     #[test]
@@ -1443,7 +1538,7 @@ mod tests {
             "propertyNames": {"not": {"pattern": "^a"}}
         });
         let err = normalize(&json!({"b": "1"}), &schema).expect_err("nested");
-        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        assert_eq!(err.to_string(), "propertyNames pattern was not evaluated");
 
         let length = json!({
             "additionalProperties": {"type": "integer"},

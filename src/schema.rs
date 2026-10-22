@@ -75,10 +75,8 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value is outside the schema length".into(),
             ));
         }
-        if violates_property_names(schema, &next) {
-            return Err(RepairError::Ambiguous(
-                "coerced value has a property name outside the schema".into(),
-            ));
+        if let Some(reason) = property_names_refusal(schema, &next) {
+            return Err(RepairError::Ambiguous(reason));
         }
     }
     Ok((next, rewrites))
@@ -536,36 +534,42 @@ fn violates_length(schema: &Value, value: &Value) -> bool {
     false
 }
 
-/// Each object key must satisfy `propertyNames`.
 fn violates_property_names(schema: &Value, value: &Value) -> bool {
-    let Some(obj) = value.as_object() else {
-        return false;
-    };
+    property_names_refusal(schema, value).is_some()
+}
+
+/// Each object key must satisfy `propertyNames`.
+/// A keyword this crate cannot evaluate is named. A length check that
+/// failed keeps the outside-schema sentence.
+fn property_names_refusal(schema: &Value, value: &Value) -> Option<String> {
+    let obj = value.as_object()?;
     let schema = if schema.get("properties").is_none() {
         schema.get("parameters").unwrap_or(schema)
     } else {
         schema
     };
-    let Some(names) = schema
+    let names = schema
         .get("propertyNames")
-        .filter(|schema| schema.is_object())
-    else {
-        return false;
-    };
-    if names_schema_is_partial(names) {
-        return !obj.is_empty();
+        .filter(|schema| schema.is_object())?;
+    if obj.is_empty() {
+        return None;
     }
-    obj.keys()
-        .any(|key| !branch_accepts(names, &Value::String(key.clone())))
+    if let Some(keyword) = unevaluable_name_keyword(names) {
+        return Some(format!("propertyNames {keyword} was not evaluated"));
+    }
+    let outside = obj
+        .keys()
+        .any(|key| !branch_accepts(names, &Value::String(key.clone())));
+    if outside {
+        Some("coerced value has a property name outside the schema".to_string())
+    } else {
+        None
+    }
 }
 
-/// `pattern` and `format` need a matcher this crate does not have.
-/// Any other unchecked keyword is the same, including one nested under `not`.
-fn names_schema_is_partial(schema: &Value) -> bool {
-    let Some(map) = schema.as_object() else {
-        return false;
-    };
-    map.iter().any(|(key, child)| {
+fn unevaluable_name_keyword(schema: &Value) -> Option<&str> {
+    let map = schema.as_object()?;
+    for (key, child) in map {
         let checked = matches!(
             key.as_str(),
             "type"
@@ -581,10 +585,18 @@ fn names_schema_is_partial(schema: &Value) -> bool {
                 | "multipleOf"
         );
         if !checked {
-            return true;
+            return Some(key.as_str());
         }
-        key == "not" && (!child.is_object() || names_schema_is_partial(child))
-    })
+        if key == "not"
+            && let Some(inner) = unevaluable_name_keyword(child)
+        {
+            return Some(inner);
+        }
+        if key == "not" && !child.is_object() {
+            return Some("not");
+        }
+    }
+    None
 }
 
 /// `dependentRequired`, and the array form of `dependencies`.
@@ -933,22 +945,31 @@ fn alias_target<'a>(
     key: &str,
     props: &'a Map<String, Value>,
 ) -> Result<Option<&'a str>, RepairError> {
-    if !PATH_KEYS.contains(&key) {
-        return Ok(None);
-    }
-    let mut targets = Vec::new();
-    for name in props.keys() {
-        if PATH_KEYS.contains(&name.as_str()) {
-            targets.push(name.as_str());
+    let mut targets: Vec<&str> = props
+        .iter()
+        .filter(|(_, prop)| property_lists_alias(prop, key))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if targets.is_empty() && PATH_KEYS.contains(&key) {
+        for name in props.keys() {
+            if PATH_KEYS.contains(&name.as_str()) {
+                targets.push(name.as_str());
+            }
         }
     }
     match targets.as_slice() {
         [] => Ok(None),
         [one] => Ok(Some(*one)),
         _ => Err(RepairError::Ambiguous(format!(
-            "'{key}' matches more than one path property"
+            "'{key}' matches more than one property"
         ))),
     }
+}
+
+fn property_lists_alias(prop: &Value, key: &str) -> bool {
+    prop.get("x-aliases")
+        .and_then(Value::as_array)
+        .is_some_and(|aliases| aliases.iter().any(|alias| alias.as_str() == Some(key)))
 }
 
 fn object_properties(schema: &Value) -> Option<&Map<String, Value>> {
