@@ -1920,6 +1920,52 @@ mod tests {
     }
 
     #[test]
+    fn string_keywords_are_not_skipped_by_coercion() {
+        let long = json!({"type": "integer", "minLength": 5});
+        let err = normalize(&json!("1"), &long).expect_err("short");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired =
+            normalize(&json!("1"), &json!({"type": "integer", "minLength": 1})).expect("fits");
+        assert_eq!(repaired.value, 1);
+        let already = normalize(&json!(1), &long).expect("already");
+        assert_eq!(already.value, 1);
+        assert!(already.rewrites.is_empty());
+
+        let patterned = json!({
+            "if": {"pattern": "^yes"},
+            "then": {"type": "integer"},
+            "else": {"type": "boolean"}
+        });
+        let kept = normalize(&json!("1"), &patterned).expect("pattern if");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let one = json!({
+            "oneOf": [
+                {"type": "integer", "pattern": "^yes"},
+                {"type": "boolean"}
+            ]
+        });
+        let kept = normalize(&json!("1"), &one).expect("pattern oneOf");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let rival = json!({
+            "oneOf": [
+                {"type": "string", "pattern": "^yes"},
+                {"type": "integer"}
+            ]
+        });
+        let kept = normalize(&json!("1"), &rival).expect("rival");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let err = normalize(&json!("1"), &json!({"type": "integer", "format": "date"}))
+            .expect_err("format");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+    }
+
+    #[test]
     fn all_of_applies_every_branch_when_they_agree() {
         let schema = json!({
             "allOf": [{"type": "integer"}, {"enum": [1, 2]}]
