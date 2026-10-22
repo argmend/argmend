@@ -1294,6 +1294,55 @@ mod tests {
     }
 
     #[test]
+    fn const_and_enum_coerce_one_matching_string() {
+        let repaired = normalize(&json!("1"), &json!({"enum": [1, 2]})).expect("enum");
+        assert_eq!(repaired.value, 1);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|rewrite| rewrite.detail.contains("enum"))
+        );
+
+        let repaired = normalize(&json!("TRUE"), &json!({"enum": [true, false]})).expect("bool");
+        assert_eq!(repaired.value, true);
+
+        let repaired = normalize(&json!(" null "), &json!({"const": null})).expect("null");
+        assert!(repaired.value.is_null());
+
+        let repaired = normalize(&json!("1e2"), &json!({"enum": [100, 200]})).expect("scientific");
+        assert_eq!(repaired.value, 100);
+
+        let repaired = normalize(&json!("1.0"), &json!({"const": 1})).expect("zero fraction");
+        assert_eq!(repaired.value, 1);
+
+        let kept = normalize(&json!("1"), &json!({"enum": ["1", 1]})).expect("both");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let kept = normalize(&json!("1"), &json!({"const": 1, "enum": ["1"]})).expect("conflict");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let kept = normalize(&json!("1"), &json!({"type": "string", "enum": [1, 2]}))
+            .expect("string type");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let kept = normalize(&json!("01"), &json!({"enum": [1]})).expect("leading zero");
+        assert_eq!(kept.value, "01");
+        assert!(kept.rewrites.is_empty());
+
+        let kept = normalize(&json!("hello"), &json!({"enum": [1]})).expect("no match");
+        assert_eq!(kept.value, "hello");
+        assert!(kept.rewrites.is_empty());
+
+        let kept = normalize(&json!("1.5"), &json!({"const": 1})).expect("fraction");
+        assert_eq!(kept.value, "1.5");
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn exact_float_is_an_integer_when_the_schema_says_integer() {
         let schema = json!({"type": "object", "properties": {"n": {"type": "integer"}}});
         let value: serde_json::Value = serde_json::from_str(r#"{"n":1.0}"#).unwrap();

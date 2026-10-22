@@ -321,7 +321,14 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
     }
     let types = schema_type_names(schema);
     // A union that includes string can keep the text. Coercing it would guess.
-    if types.is_empty() || types.contains(&"string") {
+    if types.contains(&"string") {
+        return value.clone();
+    }
+    if types.is_empty() {
+        if let Some(matched) = const_or_enum_value(value, text, schema) {
+            record_constrained(text, &matched, schema, rewrites);
+            return matched;
+        }
         return value.clone();
     }
     if types.contains(&"null") && text.eq_ignore_ascii_case("null") {
@@ -391,6 +398,108 @@ fn integer_from_exact_float(value: &Value, schema: &Value) -> Option<serde_json:
         return None;
     }
     Some(serde_json::Number::from(as_int))
+}
+
+fn const_or_enum_value(original: &Value, text: &str, schema: &Value) -> Option<Value> {
+    let targets = constrained_values(schema)?;
+    if targets.contains(&original) {
+        return None;
+    }
+    let mut chosen: Option<&Value> = None;
+    for target in &targets {
+        if !string_matches_target(text, target) {
+            continue;
+        }
+        match chosen {
+            Some(existing) if values_equivalent(existing, target) => {
+                if target.as_i64().is_some() || target.as_u64().is_some() {
+                    chosen = Some(target);
+                }
+            }
+            Some(_) => return None,
+            None => chosen = Some(target),
+        }
+    }
+    chosen.cloned()
+}
+
+fn constrained_values(schema: &Value) -> Option<Vec<&Value>> {
+    let const_value = schema.get("const");
+    let enum_values = schema.get("enum").and_then(Value::as_array);
+    match (const_value, enum_values) {
+        (None, None) => None,
+        (Some(value), None) => Some(vec![value]),
+        (None, Some(items)) => Some(items.iter().collect()),
+        (Some(value), Some(items)) => Some(items.iter().filter(|item| *item == value).collect()),
+    }
+}
+
+fn string_matches_target(text: &str, target: &Value) -> bool {
+    match target {
+        Value::Bool(flag) => text.eq_ignore_ascii_case(if *flag { "true" } else { "false" }),
+        Value::Null => text.eq_ignore_ascii_case("null"),
+        Value::Number(number) => number_matches(text, number),
+        _ => false,
+    }
+}
+
+fn number_matches(text: &str, target: &serde_json::Number) -> bool {
+    if let Some(number) = integer_string(text).or_else(|| integer_from_zero_fraction(text))
+        && numbers_equal(&number, target)
+    {
+        return true;
+    }
+    number_string(text).is_some_and(|number| numbers_equal(&number, target))
+}
+
+fn numbers_equal(left: &serde_json::Number, right: &serde_json::Number) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.as_f64(), right.as_f64()) {
+        (Some(lhs), Some(rhs)) => {
+            let limit = (1u64 << 53) as f64;
+            lhs == rhs && lhs.abs() <= limit && rhs.abs() <= limit
+        }
+        _ => false,
+    }
+}
+
+fn values_equivalent(left: &Value, right: &Value) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.as_number(), right.as_number()) {
+        (Some(lhs), Some(rhs)) => numbers_equal(lhs, rhs),
+        _ => false,
+    }
+}
+
+fn record_constrained(text: &str, matched: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) {
+    let word = if schema.get("const").is_some() {
+        "const"
+    } else {
+        "enum"
+    };
+    match matched {
+        Value::Bool(true) => rewrites.push(rewrite(
+            RewriteKind::BoolString,
+            format!("{word} boolean {text}"),
+        )),
+        Value::Bool(false) => rewrites.push(rewrite(
+            RewriteKind::BoolString,
+            format!("{word} boolean {text}"),
+        )),
+        Value::Null => rewrites.push(rewrite(
+            RewriteKind::NullString,
+            format!("{word} null {text}"),
+        )),
+        Value::Number(_) => rewrites.push(rewrite(
+            RewriteKind::NumberString,
+            format!("{word} number {text}"),
+        )),
+        _ => {}
+    }
 }
 
 fn integer_string(text: &str) -> Option<serde_json::Number> {
