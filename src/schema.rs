@@ -35,6 +35,11 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value is not a multiple of the schema".into(),
             ));
         }
+        if violates_unique(schema, &next) {
+            return Err(RepairError::Ambiguous(
+                "coerced value repeats an array item".into(),
+            ));
+        }
     }
     Ok((next, rewrites))
 }
@@ -268,6 +273,19 @@ fn violates_not(schema: &Value, value: &Value) -> bool {
 /// Inclusive `minimum` / `maximum`, numeric exclusive bounds, and the
 /// draft-04 boolean form of `exclusiveMinimum` / `exclusiveMaximum`.
 /// A bound that is not an exact finite number is ignored.
+fn violates_unique(schema: &Value, value: &Value) -> bool {
+    if schema.get("uniqueItems") != Some(&Value::Bool(true)) {
+        return false;
+    }
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    items
+        .iter()
+        .enumerate()
+        .any(|(index, item)| items[..index].contains(item))
+}
+
 /// A positive integer `multipleOf`. Zero and non-integers are not checked.
 fn violates_multiple(schema: &Value, value: &Value) -> bool {
     let Some(multiple) = schema.get("multipleOf").and_then(Value::as_i64) else {
