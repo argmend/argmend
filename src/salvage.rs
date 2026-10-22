@@ -52,6 +52,14 @@ fn strip_fence_info(rest: &str) -> &str {
     if end == 0 {
         return rest;
     }
+    let tag = &rest[..end];
+    let allowed = matches!(
+        tag,
+        "json" | "JSON" | "jsonc" | "JSONC" | "json5" | "JSON5" | "javascript" | "js" | "JS"
+    );
+    if !allowed {
+        return rest;
+    }
     let after = &rest[end..];
     if after.starts_with(['{', '[', ' ', '\t', '\n', '\r']) || after.is_empty() {
         after
