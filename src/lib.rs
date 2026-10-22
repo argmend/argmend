@@ -1337,6 +1337,22 @@ mod tests {
     }
 
     #[test]
+    fn unique_items_rejects_a_coercion_that_makes_duplicates() {
+        let schema = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "uniqueItems": true
+        });
+        let err = normalize(&json!(["1", 1]), &schema).expect_err("duplicate");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!(["1", "2"]), &schema).expect("distinct");
+        assert_eq!(repaired.value, json!([1, 2]));
+        let kept = normalize(&json!([1, 1]), &schema).expect("already");
+        assert_eq!(kept.value, json!([1, 1]));
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn multiple_of_rejects_a_coercion_that_is_not_a_multiple() {
         let schema = json!({"type": "integer", "multipleOf": 2});
         let err = normalize(&json!("3"), &schema).expect_err("odd");
