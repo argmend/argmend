@@ -48,6 +48,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = strip_unary_plus(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("stripped unary plus"));
+        text = cleaned;
+    }
+
     let cleaned = fix_triple_quotes(&text);
     if cleaned != text {
         repairs.push(syntax_note(
@@ -351,6 +357,63 @@ pub(crate) fn replace_python_literals(s: &str) -> String {
             }
             other => {
                 out.push(other);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Drop a unary `+` before a number. `1+2` is left alone.
+pub(crate) fn strip_unary_plus(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut prev_sig = None;
+
+    while i < len {
+        match chars[i] {
+            '"' => {
+                out.push('"');
+                i += 1;
+                while i < len && chars[i] != '"' {
+                    if chars[i] == '\\' {
+                        out.push(chars[i]);
+                        i += 1;
+                        if i < len {
+                            out.push(chars[i]);
+                            i += 1;
+                        }
+                    } else {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    out.push('"');
+                    i += 1;
+                }
+                prev_sig = Some('"');
+            }
+            '+' if matches!(prev_sig, Some(':' | ',' | '[' | '{')) => {
+                let mut j = i + 1;
+                while j < len && chars[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < len && chars[j].is_ascii_digit() {
+                    i = j;
+                    continue;
+                }
+                out.push('+');
+                prev_sig = Some('+');
+                i += 1;
+            }
+            other => {
+                out.push(other);
+                if !other.is_ascii_whitespace() {
+                    prev_sig = Some(other);
+                }
                 i += 1;
             }
         }
