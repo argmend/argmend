@@ -1,5 +1,4 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#F3EEE6"/>
   <defs>
     <clipPath id="ink"><rect x="0" y="0" width="512" height="336"/></clipPath>
     <clipPath id="hook"><rect x="0" y="330" width="512" height="182"/></clipPath>
