@@ -1294,6 +1294,59 @@ mod tests {
     }
 
     #[test]
+    fn one_of_coerces_when_only_one_branch_accepts() {
+        let schema = json!({
+            "oneOf": [{"type": "integer"}, {"type": "boolean"}]
+        });
+        let repaired = normalize(&json!("1"), &schema).expect("integer");
+        assert_eq!(repaired.value, 1);
+        let repaired = normalize(&json!("true"), &schema).expect("bool");
+        assert_eq!(repaired.value, true);
+        let kept = normalize(&json!("hello"), &schema).expect("neither");
+        assert_eq!(kept.value, "hello");
+        assert!(kept.rewrites.is_empty());
+
+        let either = json!({
+            "oneOf": [{"type": "integer"}, {"type": "string"}]
+        });
+        let kept = normalize(&json!("1"), &either).expect("both");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let consts = json!({
+            "oneOf": [{"const": 1}, {"const": 2}]
+        });
+        let repaired = normalize(&json!("1"), &consts).expect("const");
+        assert_eq!(repaired.value, 1);
+
+        let any = json!({
+            "anyOf": [{"type": "integer"}, {"type": "boolean"}]
+        });
+        let repaired = normalize(&json!("1"), &any).expect("any");
+        assert_eq!(repaired.value, 1);
+
+        let duplicate = json!({
+            "oneOf": [{"type": "integer"}, {"type": "integer"}]
+        });
+        let kept = normalize(&json!("1"), &duplicate).expect("duplicate");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let nested = json!({
+            "type": "object",
+            "properties": {
+                "n": {"oneOf": [{"type": "integer"}, {"type": "boolean"}]}
+            }
+        });
+        let repaired = normalize(&json!({"n": "2"}), &nested).expect("nested");
+        assert_eq!(repaired.value["n"], 2);
+
+        let already = normalize(&json!(1), &schema).expect("already");
+        assert_eq!(already.value, 1);
+        assert!(already.rewrites.is_empty());
+    }
+
+    #[test]
     fn exact_float_matches_one_const_or_enum_number() {
         let value: serde_json::Value = serde_json::from_str("1.0").unwrap();
         let repaired = normalize(&value, &json!({"const": 1})).expect("const");

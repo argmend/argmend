@@ -18,6 +18,9 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 }
 
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if let Some((next, rewrites)) = exclusive_branch(value, schema) {
+        return Ok((next, rewrites));
+    }
     let mut rewrites = Vec::new();
     let coerced = coerce(value, schema, &mut rewrites);
     if let Some(obj) = coerced.as_object() {
@@ -50,6 +53,64 @@ enum ArrayTail<'a> {
     Keep,
     Forbid,
     Schema(&'a Value),
+}
+
+/// `oneOf` and `anyOf` coerce only when one branch accepts the value.
+/// Two accepting branches are left unchanged.
+fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
+    if schema.get("oneOf").is_some() && schema.get("anyOf").is_some() {
+        return None;
+    }
+    let branches = schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array)?;
+    let mut matched = Vec::new();
+    for branch in branches {
+        let (next, rewrites) = normalize_child(value, branch).ok()?;
+        if constraints_hold(branch, &next) && constraints_hold(schema, &next) {
+            matched.push((next, rewrites));
+        }
+    }
+    if matched.len() == 1 {
+        matched.pop()
+    } else {
+        None
+    }
+}
+
+fn constraints_hold(schema: &Value, value: &Value) -> bool {
+    let types = schema_type_names(schema);
+    if !types.is_empty() && !type_matches(&types, value) {
+        return false;
+    }
+    if let Some(const_value) = schema.get("const")
+        && const_value != value
+        && !values_equivalent(const_value, value)
+    {
+        return false;
+    }
+    if let Some(items) = schema.get("enum").and_then(Value::as_array)
+        && !items
+            .iter()
+            .any(|item| item == value || values_equivalent(item, value))
+    {
+        return false;
+    }
+    true
+}
+
+fn type_matches(types: &[&str], value: &Value) -> bool {
+    types.iter().any(|kind| match *kind {
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.as_number().is_some(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        _ => false,
+    })
 }
 
 fn tuple_positions(schema: &Value) -> Option<(&Vec<Value>, ArrayTail<'_>)> {
