@@ -83,11 +83,17 @@ pub fn repair_json(raw: &str) -> RepairOutcome {
 }
 
 fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    let (raw, mut prefix) = match without_leading_bom(raw) {
+        Some(rest) => (
+            rest,
+            vec![note(RewriteKind::Syntax, "stripped leading BOM")],
+        ),
+        None => (raw, Vec::new()),
+    };
     if let Ok(value) = serde_json::from_str(raw) {
-        return Ok((value, Vec::new()));
+        return Ok((value, prefix));
     }
 
-    let mut prefix = Vec::new();
     let mut body = raw.to_string();
     if let Some(inner) = salvage::unwrap_fence(raw) {
         prefix.push(note(RewriteKind::Fence, "unwrapped markdown fence"));
@@ -99,8 +105,11 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
 
     if prefix.is_empty() {
         match syntax::repair_tool_call_json(raw) {
-            RepairOutcome::Valid(value) => return Ok((value, Vec::new())),
-            RepairOutcome::Repaired { value, repairs } => return Ok((value, repairs)),
+            RepairOutcome::Valid(value) => return Ok((value, prefix)),
+            RepairOutcome::Repaired { value, repairs } => {
+                prefix.extend(repairs);
+                return Ok((value, prefix));
+            }
             RepairOutcome::Unfixable(_) | RepairOutcome::Ambiguous(_) => {}
         }
     }
@@ -132,6 +141,12 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
             "parse failed after all repairs: {parse_error}"
         ))),
     }
+}
+
+/// BOM after ASCII whitespace, before the JSON text.
+fn without_leading_bom(raw: &str) -> Option<&str> {
+    let rest = raw.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+    rest.strip_prefix('\u{feff}')
 }
 
 fn note(kind: RewriteKind, detail: &str) -> Rewrite {
@@ -599,6 +614,31 @@ mod tests {
         assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
         let repaired = normalize(&json!({"child": {}}), &nested).expect("empty child");
         assert_eq!(repaired.value["child"], json!({}));
+    }
+
+    #[test]
+    fn leading_bom_is_stripped_and_recorded() {
+        for raw in ["\u{feff}{\"a\": 1}", " \u{feff}{\"a\": 1}"] {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value["a"], 1);
+                    assert!(
+                        repairs.iter().any(|item| item.detail.contains("BOM")),
+                        "{repairs:?}"
+                    );
+                }
+                other => panic!("expected Repaired, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bom_inside_a_string_is_not_rewritten() {
+        let raw = "{\"a\": \"\u{feff}\"}";
+        match repair_json(raw) {
+            RepairOutcome::Valid(value) => assert_eq!(value["a"], "\u{feff}"),
+            other => panic!("expected Valid, got {other:?}"),
+        }
     }
 
     #[test]
