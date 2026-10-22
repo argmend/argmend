@@ -607,6 +607,22 @@ mod tests {
     }
 
     #[test]
+    fn scientific_number_string_coerces_when_exact() {
+        let schema = json!({"type": "object", "properties": {"n": {"type": "number"}}});
+        let repaired = normalize(&json!({"n": "1e2"}), &schema).expect("exact");
+        assert_eq!(repaired.value["n"].as_f64(), Some(100.0));
+        let repaired = normalize(&json!({"n": "1.5e1"}), &schema).expect("fifteen");
+        assert_eq!(repaired.value["n"].as_f64(), Some(15.0));
+        let repaired = normalize(&json!({"n": "1e309"}), &schema).expect("overflow");
+        assert_eq!(repaired.value["n"], "1e309");
+        assert!(repaired.rewrites.is_empty());
+
+        let integers = json!({"type": "object", "properties": {"n": {"type": "integer"}}});
+        let repaired = normalize(&json!({"n": "1e2"}), &integers).expect("not an integer token");
+        assert_eq!(repaired.value["n"], "1e2");
+    }
+
+    #[test]
     fn exact_decimal_string_is_still_coerced() {
         let schema = json!({
             "type": "object",

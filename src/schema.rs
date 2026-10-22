@@ -250,7 +250,7 @@ fn number_string(text: &str) -> Option<serde_json::Number> {
     if let Some(number) = integer_string(text) {
         return Some(number);
     }
-    if !is_decimal_token(text) || has_leading_zero(text) {
+    if (!is_decimal_token(text) && !is_scientific_token(text)) || has_leading_zero(text) {
         return None;
     }
     let parsed = text.parse::<f64>().ok()?;
@@ -328,8 +328,21 @@ fn parse_decimal(text: &str) -> Option<Decimal> {
     })
 }
 
+fn is_scientific_token(text: &str) -> bool {
+    let Some((mantissa, exp)) = text.split_once(['e', 'E']) else {
+        return false;
+    };
+    let exp = exp.strip_prefix('+').unwrap_or(exp);
+    let exp_digits = exp.strip_prefix('-').unwrap_or(exp);
+    if exp_digits.is_empty() || !exp_digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    is_integer_token(mantissa) || is_decimal_token(mantissa)
+}
+
 fn has_leading_zero(text: &str) -> bool {
-    let digits = text.strip_prefix('-').unwrap_or(text);
+    let mantissa = text.split(['e', 'E']).next().unwrap_or(text);
+    let digits = mantissa.strip_prefix('-').unwrap_or(mantissa);
     let whole = digits.split('.').next().unwrap_or(digits);
     whole.len() > 1 && whole.starts_with('0')
 }
