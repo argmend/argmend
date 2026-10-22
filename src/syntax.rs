@@ -52,6 +52,12 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
+    let cleaned = normalize_curly_quotes(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("replaced curly quotes"));
+        text = cleaned;
+    }
+
     let cleaned = escape_controls_in_strings(&text);
     if cleaned != text {
         repairs.push(syntax_note("escaped controls inside strings"));
@@ -632,6 +638,44 @@ pub(crate) fn replace_python_literals(s: &str) -> String {
     out
 }
 
+/// `“` and `”` are JSON quotes. A curly quote inside a straight-quoted
+/// string stays. Curly single quotes are left alone.
+pub(crate) fn normalize_curly_quotes(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut out = String::with_capacity(s.len());
+    let mut index = 0;
+    while index < len {
+        let ch = chars[index];
+        if ch != '"' && ch != '\u{201c}' {
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        let closer = if ch == '"' { '"' } else { '\u{201d}' };
+        out.push('"');
+        index += 1;
+        while index < len && chars[index] != closer {
+            if chars[index] == '\\' && closer == '"' {
+                out.push('\\');
+                index += 1;
+                if index < len {
+                    out.push(chars[index]);
+                    index += 1;
+                }
+                continue;
+            }
+            out.push(chars[index]);
+            index += 1;
+        }
+        if index < len && chars[index] == closer {
+            out.push('"');
+            index += 1;
+        }
+    }
+    out
+}
+
 /// A raw newline, carriage return, or tab inside a double-quoted string
 /// is content. Outside a string those bytes are whitespace and stay.
 pub(crate) fn escape_controls_in_strings(s: &str) -> String {
@@ -973,7 +1017,45 @@ mod tests {
         }
     }
 
-    // ── 5. Control characters ─────────────────────────────────────────
+    #[test]
+    fn curly_double_quotes_are_json_quotes() {
+        let input = "{\u{201c}a\u{201d}: 1}";
+        match repair_tool_call_json(input) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|rewrite| rewrite.detail.contains("curly"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let input = "{\u{201c}a\u{201d}: \u{201c}hello\u{201d}}";
+        match repair_tool_call_json(input) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "hello"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let kept = "{\"a\": \"he said \u{201c}hi\u{201d}\"}";
+        match repair_tool_call_json(kept) {
+            RepairOutcome::Valid(value) => {
+                assert_eq!(value["a"], "he said \u{201c}hi\u{201d}");
+            }
+            other => panic!("expected Valid, got {other:?}"),
+        }
+        let mixed = "{\"a\": \"he said \u{201c}hi\u{201d}\", b: 1}";
+        match repair_tool_call_json(mixed) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "he said \u{201c}hi\u{201d}");
+                assert_eq!(value["b"], 1);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{\u{2018}a\u{2019}: 1}"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
 
     #[test]
     fn control_characters_stripped() {
