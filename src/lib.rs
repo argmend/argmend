@@ -1294,6 +1294,43 @@ mod tests {
     }
 
     #[test]
+    fn if_then_else_follows_the_matching_branch() {
+        let schema = json!({
+            "if": {"type": "boolean"},
+            "then": {"enum": [true]},
+            "else": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("true"), &schema).expect("then");
+        assert_eq!(repaired.value, true);
+        let repaired = normalize(&json!("1"), &schema).expect("else");
+        assert_eq!(repaired.value, 1);
+        let kept = normalize(&json!("hello"), &schema).expect("neither");
+        assert_eq!(kept.value, "hello");
+        assert!(kept.rewrites.is_empty());
+
+        let only_if = json!({
+            "if": {"const": 1},
+            "else": {"type": "boolean"}
+        });
+        let repaired = normalize(&json!("1"), &only_if).expect("if const");
+        assert_eq!(repaired.value, 1);
+        let repaired = normalize(&json!("TRUE"), &only_if).expect("else bool");
+        assert_eq!(repaired.value, true);
+
+        let clash = json!({
+            "if": {"type": "string"},
+            "then": {"type": "integer"}
+        });
+        let kept = normalize(&json!("1"), &clash).expect("clash");
+        assert_eq!(kept.value, "1");
+        assert!(kept.rewrites.is_empty());
+
+        let already = normalize(&json!(true), &schema).expect("already");
+        assert_eq!(already.value, true);
+        assert!(already.rewrites.is_empty());
+    }
+
+    #[test]
     fn all_of_applies_every_branch_when_they_agree() {
         let schema = json!({
             "allOf": [{"type": "integer"}, {"enum": [1, 2]}]
