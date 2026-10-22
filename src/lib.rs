@@ -772,4 +772,34 @@ mod tests {
             other => panic!("expected Repaired, got {other:?}"),
         }
     }
+
+    #[test]
+    fn leading_zero_integer_string_is_not_coerced() {
+        let schema = json!({"type": "object", "properties": {"n": {"type": "integer"}}});
+        let repaired = normalize(&json!({"n": "01"}), &schema).expect("keep");
+        assert_eq!(repaired.value["n"], "01");
+        assert!(repaired.rewrites.is_empty());
+        let repaired = normalize(&json!({"n": "+2"}), &schema).expect("plus");
+        assert_eq!(repaired.value["n"], 2);
+    }
+
+    #[test]
+    fn unary_plus_before_a_number_is_stripped() {
+        match repair_json("{a: +1, b: + 1.5, c: -2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 1.5);
+                assert_eq!(value["c"], -2);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{a: 1+2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{"a": "+1"}"#),
+            RepairOutcome::Valid(_)
+        ));
+    }
 }

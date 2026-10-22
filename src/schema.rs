@@ -237,7 +237,8 @@ fn coerce(value: &Value, schema: &Value, rewrites: &mut Vec<Rewrite>) -> Value {
 }
 
 fn integer_string(text: &str) -> Option<serde_json::Number> {
-    if text.is_empty() || !is_integer_token(text) {
+    let text = text.strip_prefix('+').unwrap_or(text);
+    if text.is_empty() || !is_integer_token(text) || has_leading_zero(text) {
         return None;
     }
     let parsed = text.parse::<i64>().ok()?;
@@ -245,10 +246,11 @@ fn integer_string(text: &str) -> Option<serde_json::Number> {
 }
 
 fn number_string(text: &str) -> Option<serde_json::Number> {
+    let text = text.strip_prefix('+').unwrap_or(text);
     if let Some(number) = integer_string(text) {
         return Some(number);
     }
-    if !is_decimal_token(text) {
+    if !is_decimal_token(text) || has_leading_zero(text) {
         return None;
     }
     let parsed = text.parse::<f64>().ok()?;
@@ -324,6 +326,12 @@ fn parse_decimal(text: &str) -> Option<Decimal> {
         coef,
         exp10,
     })
+}
+
+fn has_leading_zero(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let whole = digits.split('.').next().unwrap_or(digits);
+    whole.len() > 1 && whole.starts_with('0')
 }
 
 fn is_integer_token(text: &str) -> bool {
