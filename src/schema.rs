@@ -502,15 +502,17 @@ fn branch_accepts(schema: &Value, value: &Value) -> bool {
         && !violates_property_names(schema, value)
 }
 
-/// `pattern` and `format` apply to strings and this crate cannot evaluate
-/// them. A nested copy under `not` counts too.
+/// `pattern`, `format`, and the content keywords apply to strings and
+/// this crate cannot evaluate them. A nested copy under `not` counts too.
 fn unchecked_string_keyword(schema: &Value) -> bool {
     let Some(map) = schema.as_object() else {
         return false;
     };
     map.iter().any(|(key, child)| {
-        matches!(key.as_str(), "pattern" | "format")
-            || (key == "not" && unchecked_string_keyword(child))
+        matches!(
+            key.as_str(),
+            "pattern" | "format" | "contentEncoding" | "contentMediaType" | "contentSchema"
+        ) || (key == "not" && unchecked_string_keyword(child))
     })
 }
 

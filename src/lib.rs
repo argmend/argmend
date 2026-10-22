@@ -1966,6 +1966,28 @@ mod tests {
     }
 
     #[test]
+    fn content_keywords_are_not_skipped_by_coercion() {
+        let encoding = json!({"type": "integer", "contentEncoding": "base64"});
+        let err = normalize(&json!("1"), &encoding).expect_err("encoding");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let media = json!({"type": "integer", "contentMediaType": "text/plain"});
+        let err = normalize(&json!("1"), &media).expect_err("media");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let nested = json!({
+            "type": "integer",
+            "not": {"contentSchema": {"type": "object"}}
+        });
+        let err = normalize(&json!("1"), &nested).expect_err("nested");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let already = normalize(&json!(1), &encoding).expect("already");
+        assert_eq!(already.value, 1);
+        assert!(already.rewrites.is_empty());
+    }
+
+    #[test]
     fn all_of_applies_every_branch_when_they_agree() {
         let schema = json!({
             "allOf": [{"type": "integer"}, {"enum": [1, 2]}]
