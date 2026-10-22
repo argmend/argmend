@@ -891,6 +891,21 @@ mod tests {
     }
 
     #[test]
+    fn dotted_bare_key_is_quoted() {
+        match repair_json(r#"{file.name: "a.rs", a.b.c: true}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["file.name"], "a.rs");
+                assert_eq!(value["a.b.c"], true);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{n: 1.2}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["n"], 1.2),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn hyphenated_bare_key_is_quoted() {
         match repair_json(r#"{file-path: "a.rs"}"#) {
             RepairOutcome::Repaired { value, .. } => {

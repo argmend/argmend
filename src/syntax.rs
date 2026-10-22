@@ -232,7 +232,7 @@ pub(crate) fn quote_bare_keys(s: &str) -> String {
                 let mut hyphenated = i;
                 loop {
                     if hyphenated + 1 < len
-                        && chars[hyphenated] == '-'
+                        && (chars[hyphenated] == '-' || chars[hyphenated] == '.')
                         && (chars[hyphenated + 1].is_ascii_alphanumeric()
                             || chars[hyphenated + 1] == '_')
                     {
