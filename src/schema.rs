@@ -20,6 +20,16 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let (next, rewrites) = normalize_known(value, schema)?;
     if next != *value || !rewrites.is_empty() {
+        if value.as_str().is_some() && violates_length(schema, value) {
+            return Err(RepairError::Ambiguous(
+                "coerced string is outside the schema length".into(),
+            ));
+        }
+        if value.as_str().is_some() && unchecked_string_keyword(schema) {
+            return Err(RepairError::Ambiguous(
+                "coerced string is outside an unchecked string keyword".into(),
+            ));
+        }
         if violates_not(schema, &next) {
             return Err(RepairError::Ambiguous(
                 "coerced value is excluded by not".into(),
@@ -206,6 +216,13 @@ fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> 
     if then_schema.is_none() && else_schema.is_none() {
         return None;
     }
+    if value.is_string()
+        && (unchecked_string_keyword(if_schema)
+            || then_schema.is_some_and(unchecked_string_keyword)
+            || else_schema.is_some_and(unchecked_string_keyword))
+    {
+        return None;
+    }
     let if_hit = match normalize_child(value, if_schema) {
         Ok((probed, probe_rewrites)) if branch_accepts(if_schema, &probed) => {
             Some((probed, probe_rewrites))
@@ -247,6 +264,13 @@ fn all_of(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     if branches.is_empty() {
         return None;
     }
+    if value.is_string()
+        && branches
+            .iter()
+            .any(unchecked_string_keyword)
+    {
+        return None;
+    }
     let mut current = value.clone();
     let mut rewrites = Vec::new();
     for branch in branches {
@@ -285,6 +309,13 @@ fn single_applicator<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>>
 fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
     let branches =
         single_applicator(schema, "oneOf").or_else(|| single_applicator(schema, "anyOf"))?;
+    if value.is_string()
+        && branches
+            .iter()
+            .any(unchecked_string_keyword)
+    {
+        return None;
+    }
     let mut matched = Vec::new();
     for branch in branches {
         let Ok((next, rewrites)) = normalize_child(value, branch) else {
@@ -461,6 +492,9 @@ fn known_constraint(schema: &Value) -> bool {
 /// dependent names, string length, property names, `not`, numeric bounds,
 /// `multipleOf`, `uniqueItems`, `contains`, and size limits.
 fn branch_accepts(schema: &Value, value: &Value) -> bool {
+    if value.is_string() && unchecked_string_keyword(schema) {
+        return false;
+    }
     constraints_hold(schema, value)
         && properties_match(schema, value)
         && elements_match(schema, value)
@@ -474,6 +508,18 @@ fn branch_accepts(schema: &Value, value: &Value) -> bool {
         && !violates_dependent(schema, value)
         && !violates_length(schema, value)
         && !violates_property_names(schema, value)
+}
+
+/// `pattern` and `format` apply to strings and this crate cannot evaluate
+/// them. A nested copy under `not` counts too.
+fn unchecked_string_keyword(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        return false;
+    };
+    map.iter().any(|(key, child)| {
+        matches!(key.as_str(), "pattern" | "format")
+            || (key == "not" && unchecked_string_keyword(child))
+    })
 }
 
 /// `minLength` and `maxLength` count characters. A limit that is not an
