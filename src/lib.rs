@@ -2179,6 +2179,31 @@ mod tests {
     }
 
     #[test]
+    fn property_bound_error_names_the_key() {
+        let schema = json!({
+            "properties": {
+                "age": {"type": "integer", "maximum": 120},
+                "score": {"type": "integer", "maximum": 10}
+            }
+        });
+        let err = normalize(&json!({"age": "200", "score": "3"}), &schema).expect_err("age");
+        assert!(err.to_string().contains("'age'"), "{err}");
+        let err = normalize(&json!({"age": "20", "score": "30"}), &schema).expect_err("score");
+        let text = err.to_string();
+        assert!(text.contains("'score'"), "{err}");
+        assert!(!text.contains("'age'"), "{err}");
+
+        let root = json!({"type": "integer", "maximum": 10});
+        let err = normalize(&json!("50"), &root).expect_err("root");
+        let text = err.to_string();
+        assert!(
+            text.contains("coerced value is outside the schema bounds"),
+            "{err}"
+        );
+        assert!(!text.contains('\''), "{err}");
+    }
+
+    #[test]
     fn not_rejects_a_coercion_that_matches_the_excluded_schema() {
         let schema = json!({"type": "integer", "not": {"const": 1}});
         let err = normalize(&json!("1"), &schema).expect_err("excluded");

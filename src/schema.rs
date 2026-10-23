@@ -994,6 +994,14 @@ fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>
     Ok((Value::Array(out), rewrites))
 }
 
+/// Name the property on an ambiguous child error. Other variants stay as they are.
+fn prefix_property_error(key: &str, err: RepairError) -> RepairError {
+    match err {
+        RepairError::Ambiguous(reason) => RepairError::Ambiguous(format!("'{key}': {reason}")),
+        other => other,
+    }
+}
+
 fn normalize_object(
     obj: &Map<String, Value>,
     schema: &Value,
@@ -1005,7 +1013,8 @@ fn normalize_object(
 
     for (key, val) in obj {
         if let Some(prop_schema) = props.get(key) {
-            let (next, more) = normalize_child(val, prop_schema)?;
+            let (next, more) =
+                normalize_child(val, prop_schema).map_err(|err| prefix_property_error(key, err))?;
             rewrites.extend(more);
             out.insert(key.clone(), next);
             continue;
@@ -1017,7 +1026,11 @@ fn normalize_object(
                 // `1` agree, and key order does not change the result.
                 if let Some(canonical) = normalized_alias_side(obj, &out, target, props)? {
                     let alias = match props.get(target) {
-                        Some(prop_schema) => normalize_child(val, prop_schema)?.0,
+                        Some(prop_schema) => {
+                            normalize_child(val, prop_schema)
+                                .map_err(|err| prefix_property_error(key, err))?
+                                .0
+                        }
                         None => val.clone(),
                     };
                     if !values_equivalent(&alias, &canonical) {
@@ -1035,7 +1048,8 @@ fn normalize_object(
                     unknown.push((key.clone(), val.clone()));
                     continue;
                 };
-                let (next, more) = normalize_child(val, prop_schema)?;
+                let (next, more) = normalize_child(val, prop_schema)
+                    .map_err(|err| prefix_property_error(key, err))?;
                 rewrites.extend(more);
                 rewrites.push(rewrite(
                     RewriteKind::Alias,
@@ -1086,7 +1100,8 @@ fn normalize_object(
             )));
         }
         for (key, val) in unknown {
-            let (next, more) = normalize_child(&val, extra)?;
+            let (next, more) =
+                normalize_child(&val, extra).map_err(|err| prefix_property_error(&key, err))?;
             rewrites.extend(more);
             out.insert(key, next);
         }
