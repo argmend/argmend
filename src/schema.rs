@@ -1012,9 +1012,15 @@ fn normalize_object(
         }
         match alias_target(key, props)? {
             Some(target) => {
-                let existing = out.get(target).or_else(|| obj.get(target));
-                if let Some(existing) = existing {
-                    if existing != val {
+                // The canonical key may already have been coerced into `out`.
+                // Compare both sides after the property schema, so `"1"` and
+                // `1` agree, and key order does not change the result.
+                if let Some(canonical) = normalized_alias_side(obj, &out, target, props)? {
+                    let alias = match props.get(target) {
+                        Some(prop_schema) => normalize_child(val, prop_schema)?.0,
+                        None => val.clone(),
+                    };
+                    if !values_equivalent(&alias, &canonical) {
                         return Err(RepairError::Ambiguous(format!(
                             "'{key}' and '{target}' are both set and disagree"
                         )));
@@ -1091,6 +1097,24 @@ fn normalize_object(
     }
 
     Ok((Value::Object(out), rewrites))
+}
+
+/// The other side of an alias, after the property schema. `None` means the
+/// canonical name is not set yet, so this alias is a rename.
+fn normalized_alias_side(
+    obj: &Map<String, Value>,
+    out: &Map<String, Value>,
+    target: &str,
+    props: &Map<String, Value>,
+) -> Result<Option<Value>, RepairError> {
+    if let Some(raw) = obj.get(target) {
+        let Some(prop_schema) = props.get(target) else {
+            return Ok(Some(raw.clone()));
+        };
+        let (value, _) = normalize_child(raw, prop_schema)?;
+        return Ok(Some(value));
+    }
+    Ok(out.get(target).cloned())
 }
 
 fn alias_target<'a>(
