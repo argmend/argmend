@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "argmend"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "proptest",
  "serde_json",
