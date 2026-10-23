@@ -1641,6 +1641,27 @@ mod tests {
     }
 
     #[test]
+    fn dependent_schema_rejection_is_not_ok() {
+        let schema = json!({
+            "properties": {"flag": {"type": "boolean"}},
+            "dependentSchemas": {
+                "flag": {"properties": {"n": {"type": "integer", "maximum": 10}}}
+            }
+        });
+        let err = normalize(&json!({"flag": "true", "n": "50"}), &schema).expect_err("past max");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let repaired = normalize(&json!({"flag": "true", "n": "5"}), &schema).expect("inside");
+        assert_eq!(repaired.value["flag"], true);
+        assert_eq!(repaired.value["n"], 5);
+
+        let kept = normalize(&json!({"n": "50"}), &schema).expect("absent");
+        assert_eq!(kept.value["n"], "50");
+        assert!(kept.value.get("flag").is_none());
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn dependent_names_reject_a_coercion_that_omits_them() {
         let schema = json!({
             "properties": {"flag": {"type": "boolean"}},
@@ -2158,6 +2179,31 @@ mod tests {
     }
 
     #[test]
+    fn property_bound_error_names_the_key() {
+        let schema = json!({
+            "properties": {
+                "age": {"type": "integer", "maximum": 120},
+                "score": {"type": "integer", "maximum": 10}
+            }
+        });
+        let err = normalize(&json!({"age": "200", "score": "3"}), &schema).expect_err("age");
+        assert!(err.to_string().contains("'age'"), "{err}");
+        let err = normalize(&json!({"age": "20", "score": "30"}), &schema).expect_err("score");
+        let text = err.to_string();
+        assert!(text.contains("'score'"), "{err}");
+        assert!(!text.contains("'age'"), "{err}");
+
+        let root = json!({"type": "integer", "maximum": 10});
+        let err = normalize(&json!("50"), &root).expect_err("root");
+        let text = err.to_string();
+        assert!(
+            text.contains("coerced value is outside the schema bounds"),
+            "{err}"
+        );
+        assert!(!text.contains('\''), "{err}");
+    }
+
+    #[test]
     fn not_rejects_a_coercion_that_matches_the_excluded_schema() {
         let schema = json!({"type": "integer", "not": {"const": 1}});
         let err = normalize(&json!("1"), &schema).expect_err("excluded");
@@ -2453,6 +2499,34 @@ mod tests {
         let already = normalize(&json!(1), &schema).expect("already");
         assert_eq!(already.value, 1);
         assert!(already.rewrites.is_empty());
+    }
+
+    #[test]
+    fn applicator_branch_error_is_not_ok() {
+        let all = json!({
+            "allOf": [{"type": "integer", "maximum": 10}]
+        });
+        let err = normalize(&json!("50"), &all).expect_err("allOf");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("5"), &all).expect("allOf inside");
+        assert_eq!(repaired.value, 5);
+
+        let branch = json!({
+            "if": {"type": "integer"},
+            "then": {"type": "integer", "maximum": 10}
+        });
+        let err = normalize(&json!("50"), &branch).expect_err("then");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("5"), &branch).expect("then inside");
+        assert_eq!(repaired.value, 5);
+
+        let one = json!({
+            "oneOf": [{"type": "integer", "maximum": 10}]
+        });
+        let err = normalize(&json!("50"), &one).expect_err("oneOf");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("5"), &one).expect("oneOf inside");
+        assert_eq!(repaired.value, 5);
     }
 
     #[test]
