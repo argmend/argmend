@@ -85,13 +85,13 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
 }
 
 fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
-    if let Some((next, rewrites)) = if_then_else(value, schema) {
+    if let Some((next, rewrites)) = if_then_else(value, schema)? {
         return enforce_outer_object(value, next, schema, rewrites);
     }
-    if let Some((next, rewrites)) = all_of(value, schema) {
+    if let Some((next, rewrites)) = all_of(value, schema)? {
         return enforce_outer_object(value, next, schema, rewrites);
     }
-    if let Some((next, rewrites)) = exclusive_branch(value, schema) {
+    if let Some((next, rewrites)) = exclusive_branch(value, schema)? {
         return enforce_outer_object(value, next, schema, rewrites);
     }
     if let Some((next, rewrites)) = deep_constrained(value, schema) {
@@ -202,26 +202,32 @@ fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
 
 /// When `if` matches, apply `then`. Otherwise apply `else`.
 /// The `then` result must still match `if`.
-/// A branch that refuses the value does not match, so `else` still runs.
-fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
+/// A refusing `if` probe does not match, so `else` still runs.
+/// An error from the matched `then` or `else` branch is returned.
+fn if_then_else(
+    value: &Value,
+    schema: &Value,
+) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     if schema.get("allOf").is_some()
         || schema.get("oneOf").is_some()
         || schema.get("anyOf").is_some()
     {
-        return None;
+        return Ok(None);
     }
-    let if_schema = schema.get("if")?;
+    let Some(if_schema) = schema.get("if") else {
+        return Ok(None);
+    };
     let then_schema = schema.get("then");
     let else_schema = schema.get("else");
     if then_schema.is_none() && else_schema.is_none() {
-        return None;
+        return Ok(None);
     }
     if value.is_string()
         && (unchecked_string_keyword(if_schema)
             || then_schema.is_some_and(unchecked_string_keyword)
             || else_schema.is_some_and(unchecked_string_keyword))
     {
-        return None;
+        return Ok(None);
     }
     let if_hit = match normalize_child(value, if_schema) {
         Ok((probed, probe_rewrites)) if branch_accepts(if_schema, &probed) => {
@@ -232,61 +238,71 @@ fn if_then_else(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> 
     if let Some((probed, probe_rewrites)) = if_hit {
         let Some(then_schema) = then_schema else {
             if probed == *value && probe_rewrites.is_empty() {
-                return None;
+                return Ok(None);
             }
-            return Some((probed, probe_rewrites));
+            return Ok(Some((probed, probe_rewrites)));
         };
-        let (next, more) = normalize_child(&probed, then_schema).ok()?;
+        let (next, more) = normalize_child(&probed, then_schema)?;
+        let coerced = probed != *value || !probe_rewrites.is_empty();
+        if !branch_accepts(then_schema, &next) && coerced {
+            // The `if` probe already coerced, so `then` did not see the original value.
+            normalize_child(value, then_schema)?;
+        }
         if !branch_accepts(if_schema, &next) || !branch_accepts(then_schema, &next) {
-            return None;
+            return Ok(None);
         }
         let mut rewrites = probe_rewrites;
         rewrites.extend(more);
         if next == *value && rewrites.is_empty() {
-            return None;
+            return Ok(None);
         }
-        return Some((next, rewrites));
+        return Ok(Some((next, rewrites)));
     }
-    let else_schema = else_schema?;
-    let (next, rewrites) = normalize_child(value, else_schema).ok()?;
+    let Some(else_schema) = else_schema else {
+        return Ok(None);
+    };
+    let (next, rewrites) = normalize_child(value, else_schema)?;
     if !branch_accepts(else_schema, &next) {
-        return None;
+        return Ok(None);
     }
     if next == *value && rewrites.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((next, rewrites))
+    Ok(Some((next, rewrites)))
 }
 
 /// Apply every `allOf` branch. The result must still satisfy each branch.
-fn all_of(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
-    let branches = single_applicator(schema, "allOf")?;
+/// A [`RepairError`] from a branch is not discarded.
+fn all_of(value: &Value, schema: &Value) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
+    let Some(branches) = single_applicator(schema, "allOf") else {
+        return Ok(None);
+    };
     if branches.is_empty() {
-        return None;
+        return Ok(None);
     }
     if value.is_string() && branches.iter().any(unchecked_string_keyword) {
-        return None;
+        return Ok(None);
     }
     let mut current = value.clone();
     let mut rewrites = Vec::new();
     for branch in branches {
-        let (next, more) = normalize_child(&current, branch).ok()?;
+        let (next, more) = normalize_child(&current, branch)?;
         if !branch_accepts(branch, &next) {
-            return None;
+            return Ok(None);
         }
         current = next;
         rewrites.extend(more);
     }
     for branch in branches {
-        let (next, _) = normalize_child(&current, branch).ok()?;
+        let (next, _) = normalize_child(&current, branch)?;
         if next != current || !branch_accepts(branch, &next) {
-            return None;
+            return Ok(None);
         }
     }
     if current == *value && rewrites.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((current, rewrites))
+    Ok(Some((current, rewrites)))
 }
 
 fn single_applicator<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
@@ -302,26 +318,44 @@ fn single_applicator<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>>
 
 /// `oneOf` and `anyOf` coerce only when one branch accepts the value.
 /// Two accepting branches are left unchanged.
-fn exclusive_branch(value: &Value, schema: &Value) -> Option<(Value, Vec<Rewrite>)> {
-    let branches =
-        single_applicator(schema, "oneOf").or_else(|| single_applicator(schema, "anyOf"))?;
+/// A branch error is not a match. When every branch errors, that error is returned.
+fn exclusive_branch(
+    value: &Value,
+    schema: &Value,
+) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
+    let Some(branches) =
+        single_applicator(schema, "oneOf").or_else(|| single_applicator(schema, "anyOf"))
+    else {
+        return Ok(None);
+    };
     if value.is_string() && branches.iter().any(unchecked_string_keyword) {
-        return None;
+        return Ok(None);
     }
     let mut matched = Vec::new();
+    let mut saw_ok = false;
+    let mut branch_error = None;
     for branch in branches {
-        let Ok((next, rewrites)) = normalize_child(value, branch) else {
-            continue;
-        };
-        if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
-            matched.push((next, rewrites));
+        match normalize_child(value, branch) {
+            Ok((next, rewrites)) => {
+                saw_ok = true;
+                if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
+                    matched.push((next, rewrites));
+                }
+            }
+            Err(err) => {
+                if branch_error.is_none() {
+                    branch_error = Some(err);
+                }
+            }
         }
     }
     if matched.len() == 1 {
-        matched.pop()
-    } else {
-        None
+        return Ok(matched.pop());
     }
+    if !saw_ok && let Some(err) = branch_error {
+        return Err(err);
+    }
+    Ok(None)
 }
 
 /// A rewrite that satisfies `not` is refused.

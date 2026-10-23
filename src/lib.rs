@@ -2502,6 +2502,34 @@ mod tests {
     }
 
     #[test]
+    fn applicator_branch_error_is_not_ok() {
+        let all = json!({
+            "allOf": [{"type": "integer", "maximum": 10}]
+        });
+        let err = normalize(&json!("50"), &all).expect_err("allOf");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("5"), &all).expect("allOf inside");
+        assert_eq!(repaired.value, 5);
+
+        let branch = json!({
+            "if": {"type": "integer"},
+            "then": {"type": "integer", "maximum": 10}
+        });
+        let err = normalize(&json!("50"), &branch).expect_err("then");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("5"), &branch).expect("then inside");
+        assert_eq!(repaired.value, 5);
+
+        let one = json!({
+            "oneOf": [{"type": "integer", "maximum": 10}]
+        });
+        let err = normalize(&json!("50"), &one).expect_err("oneOf");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let repaired = normalize(&json!("5"), &one).expect("oneOf inside");
+        assert_eq!(repaired.value, 5);
+    }
+
+    #[test]
     fn exact_float_matches_one_const_or_enum_number() {
         let value: serde_json::Value = serde_json::from_str("1.0").unwrap();
         let repaired = normalize(&value, &json!({"const": 1})).expect("const");
