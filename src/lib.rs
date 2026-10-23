@@ -812,6 +812,75 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_alias_matches_after_coercion() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "integer", "x-aliases": ["text"]}
+            },
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"content": "hi", "text": "hi"}), &schema).expect("text");
+        assert_eq!(repaired.value, json!({"content": "hi"}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "dropped duplicate alias text")
+        );
+
+        for raw in [
+            json!({"content": "1", "text": "1"}),
+            json!({"text": "1", "content": "1"}),
+            json!({"content": "1", "text": " 1 "}),
+            json!({"content": 1, "text": 1}),
+        ] {
+            let repaired = normalize(&raw, &schema).expect("same number");
+            assert_eq!(repaired.value, json!({"content": 1}), "{raw}");
+            assert!(
+                repaired
+                    .rewrites
+                    .iter()
+                    .any(|item| item.detail == "dropped duplicate alias text"),
+                "{raw} {:?}",
+                repaired.rewrites
+            );
+        }
+        let err = normalize(&json!({"content": "1", "text": "2"}), &schema).expect_err("differ");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+
+        let repaired = normalize(&json!({"text": "1"}), &schema).expect("alias");
+        assert_eq!(repaired.value, json!({"content": 1}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "renamed text to content")
+        );
+        let repaired = normalize(&json!({"content": "1"}), &schema).expect("canonical");
+        assert_eq!(repaired.value, json!({"content": 1}));
+
+        let late = json!({
+            "type": "object",
+            "properties": {
+                "z": {"type": "integer", "x-aliases": ["a"]}
+            },
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"z": "1", "a": "1"}), &late).expect("alias first");
+        assert_eq!(repaired.value, json!({"z": 1}));
+        let early = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "integer", "x-aliases": ["z"]}
+            },
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"a": "1", "z": "1"}), &early).expect("canonical first");
+        assert_eq!(repaired.value, json!({"a": 1}));
+    }
+
+    #[test]
     fn whitespace_around_a_typed_string_is_trimmed() {
         let schema = json!({
             "type": "object",
