@@ -1641,6 +1641,27 @@ mod tests {
     }
 
     #[test]
+    fn dependent_schema_rejection_is_not_ok() {
+        let schema = json!({
+            "properties": {"flag": {"type": "boolean"}},
+            "dependentSchemas": {
+                "flag": {"properties": {"n": {"type": "integer", "maximum": 10}}}
+            }
+        });
+        let err = normalize(&json!({"flag": "true", "n": "50"}), &schema).expect_err("past max");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+
+        let repaired = normalize(&json!({"flag": "true", "n": "5"}), &schema).expect("inside");
+        assert_eq!(repaired.value["flag"], true);
+        assert_eq!(repaired.value["n"], 5);
+
+        let kept = normalize(&json!({"n": "50"}), &schema).expect("absent");
+        assert_eq!(kept.value["n"], "50");
+        assert!(kept.value.get("flag").is_none());
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn dependent_names_reject_a_coercion_that_omits_them() {
         let schema = json!({
             "properties": {"flag": {"type": "boolean"}},

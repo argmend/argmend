@@ -116,9 +116,8 @@ fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
             next = normalized;
             saw_object_schema = true;
         }
-        if let Some((updated, extra)) = next
-            .as_object()
-            .and_then(|map| apply_dependent_schemas(map, schema))
+        if let Some(map) = next.as_object()
+            && let Some((updated, extra)) = apply_dependent_schemas(map, schema)?
         {
             rewrites.extend(extra);
             return Ok((updated, rewrites));
@@ -146,38 +145,39 @@ enum ArrayTail<'a> {
 
 /// A present property applies its `dependentSchemas` or schema-form
 /// `dependencies` entry. An array of required names is not invented.
+/// A [`RepairError`] from a branch is not discarded.
 fn apply_dependent_schemas(
     obj: &Map<String, Value>,
     schema: &Value,
-) -> Option<(Value, Vec<Rewrite>)> {
+) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let active = dependent_object_schemas(schema)
         .into_iter()
         .filter(|(name, _)| obj.contains_key(*name))
         .map(|(_, sub)| sub)
         .collect::<Vec<_>>();
     if active.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut current = Value::Object(obj.clone());
     let mut rewrites = Vec::new();
     for branch in &active {
-        let (next, more) = normalize_child(&current, branch).ok()?;
+        let (next, more) = normalize_child(&current, branch)?;
         if !branch_accepts(branch, &next) {
-            return None;
+            return Ok(None);
         }
         current = next;
         rewrites.extend(more);
     }
     for branch in &active {
-        let (next, _) = normalize_child(&current, branch).ok()?;
+        let (next, _) = normalize_child(&current, branch)?;
         if next != current || !branch_accepts(branch, &next) {
-            return None;
+            return Ok(None);
         }
     }
     if current == Value::Object(obj.clone()) && rewrites.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((current, rewrites))
+    Ok(Some((current, rewrites)))
 }
 
 fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
