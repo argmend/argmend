@@ -1172,7 +1172,8 @@ fn normalized_alias_side(
         let Some(prop_schema) = props.get(target) else {
             return Ok(Some(raw.clone()));
         };
-        let (value, _) = normalize_child(raw, prop_schema)?;
+        let (value, _) =
+            normalize_child(raw, prop_schema).map_err(|err| prefix_property_error(target, err))?;
         return Ok(Some(value));
     }
     Ok(out.get(target).cloned())

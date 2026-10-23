@@ -881,6 +881,30 @@ mod tests {
     }
 
     #[test]
+    fn alias_bound_error_names_the_canonical_key() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "integer", "maximum": 10, "x-aliases": ["text"]}
+            },
+            "additionalProperties": false
+        });
+        let err = normalize(&json!({"content": "50", "text": "1"}), &schema).expect_err("both");
+        assert!(err.to_string().contains("'content'"), "{err}");
+        let late = json!({
+            "type": "object",
+            "properties": {
+                "z": {"type": "integer", "maximum": 10, "x-aliases": ["a"]}
+            },
+            "additionalProperties": false
+        });
+        let err = normalize(&json!({"z": "50", "a": "1"}), &late).expect_err("alias first");
+        assert!(err.to_string().contains("'z'"), "{err}");
+        let err = normalize(&json!({"text": "50"}), &schema).expect_err("alias");
+        assert!(err.to_string().contains("'text'"), "{err}");
+    }
+
+    #[test]
     fn whitespace_around_a_typed_string_is_trimmed() {
         let schema = json!({
             "type": "object",
