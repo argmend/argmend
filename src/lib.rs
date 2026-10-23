@@ -881,6 +881,25 @@ mod tests {
     }
 
     #[test]
+    fn any_of_with_no_match_is_not_ok() {
+        let schema = json!({
+            "anyOf": [
+                {"type": "integer", "maximum": 10},
+                {"type": "boolean"}
+            ]
+        });
+        let err = normalize(&json!("50"), &schema).expect_err("no branch");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+        let repaired = normalize(&json!("5"), &schema).expect("integer");
+        assert_eq!(repaired.value, 5);
+        let repaired = normalize(&json!("true"), &schema).expect("bool");
+        assert_eq!(repaired.value, true);
+        let kept = normalize(&json!("hello"), &schema).expect("neither");
+        assert_eq!(kept.value, "hello");
+        assert!(kept.rewrites.is_empty());
+    }
+
+    #[test]
     fn alias_bound_error_names_the_canonical_key() {
         let schema = json!({
             "type": "object",

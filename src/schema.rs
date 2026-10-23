@@ -318,7 +318,8 @@ fn single_applicator<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>>
 
 /// `oneOf` and `anyOf` coerce only when one branch accepts the value.
 /// Two accepting branches are left unchanged.
-/// A branch error is not a match. When every branch errors, that error is returned.
+/// A branch error is not a match. If no branch accepts and one rejected a
+/// coercion, that error is returned. A value that matches nothing stays.
 fn exclusive_branch(
     value: &Value,
     schema: &Value,
@@ -332,12 +333,10 @@ fn exclusive_branch(
         return Ok(None);
     }
     let mut matched = Vec::new();
-    let mut saw_ok = false;
     let mut branch_error = None;
     for branch in branches {
         match normalize_child(value, branch) {
             Ok((next, rewrites)) => {
-                saw_ok = true;
                 if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
                     matched.push((next, rewrites));
                 }
@@ -352,7 +351,12 @@ fn exclusive_branch(
     if matched.len() == 1 {
         return Ok(matched.pop());
     }
-    if !saw_ok && let Some(err) = branch_error {
+    // A branch that rejected a coercion is not ignored just because another
+    // branch returned the original text without accepting it. A value that
+    // simply matches nothing, such as "hello", stays unchanged.
+    if matched.is_empty()
+        && let Some(err) = branch_error
+    {
         return Err(err);
     }
     Ok(None)
