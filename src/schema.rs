@@ -994,11 +994,13 @@ fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>
         let mut rewrites = Vec::new();
         for (index, item) in arr.iter().enumerate() {
             if let Some(position) = positions.get(index) {
-                let (next, more) = normalize_child(item, position)?;
+                let (next, more) = normalize_child(item, position)
+                    .map_err(|err| prefix_index_error(index, err))?;
                 rewrites.extend(more);
                 out.push(next);
             } else if let ArrayTail::Schema(rest) = tail {
-                let (next, more) = normalize_child(item, rest)?;
+                let (next, more) =
+                    normalize_child(item, rest).map_err(|err| prefix_index_error(index, err))?;
                 rewrites.extend(more);
                 out.push(next);
             } else {
@@ -1020,8 +1022,9 @@ fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>
     };
     let mut out = Vec::with_capacity(arr.len());
     let mut rewrites = Vec::new();
-    for item in arr {
-        let (next, more) = normalize_child(item, items)?;
+    for (index, item) in arr.iter().enumerate() {
+        let (next, more) =
+            normalize_child(item, items).map_err(|err| prefix_index_error(index, err))?;
         rewrites.extend(more);
         out.push(next);
     }
@@ -1030,8 +1033,17 @@ fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>
 
 /// Name the property on an ambiguous child error. Other variants stay as they are.
 fn prefix_property_error(key: &str, err: RepairError) -> RepairError {
+    prefix_ambiguous(&format!("'{key}'"), err)
+}
+
+/// Name the array index on an ambiguous child error. Other variants stay as they are.
+fn prefix_index_error(index: usize, err: RepairError) -> RepairError {
+    prefix_ambiguous(&format!("[{index}]"), err)
+}
+
+fn prefix_ambiguous(location: &str, err: RepairError) -> RepairError {
     match err {
-        RepairError::Ambiguous(reason) => RepairError::Ambiguous(format!("'{key}': {reason}")),
+        RepairError::Ambiguous(reason) => RepairError::Ambiguous(format!("{location}: {reason}")),
         other => other,
     }
 }

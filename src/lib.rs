@@ -2204,6 +2204,45 @@ mod tests {
     }
 
     #[test]
+    fn array_bound_error_names_the_index() {
+        let schema = json!({
+            "type": "array",
+            "items": {"type": "integer", "maximum": 10}
+        });
+        let err = normalize(&json!(["1", "50"]), &schema).expect_err("second");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("[1]"), "{err}");
+        assert!(!text.contains("[0]"), "{err}");
+
+        let err = normalize(&json!(["50"]), &schema).expect_err("first");
+        assert!(err.to_string().contains("[0]"), "{err}");
+
+        let repaired = normalize(&json!(["5"]), &schema).expect("in range");
+        assert_eq!(repaired.value, json!([5]));
+
+        let root = json!({"type": "integer", "maximum": 10});
+        let err = normalize(&json!("50"), &root).expect_err("root");
+        let text = err.to_string();
+        assert!(
+            text.contains("coerced value is outside the schema bounds"),
+            "{err}"
+        );
+        assert!(!text.starts_with('['), "{err}");
+
+        let tuple = json!({
+            "prefixItems": [
+                {"type": "integer", "maximum": 10},
+                {"type": "integer", "maximum": 10}
+            ]
+        });
+        let err = normalize(&json!(["1", "50"]), &tuple).expect_err("tuple");
+        let text = err.to_string();
+        assert!(text.contains("[1]"), "{err}");
+        assert!(!text.contains("[0]"), "{err}");
+    }
+
+    #[test]
     fn not_rejects_a_coercion_that_matches_the_excluded_schema() {
         let schema = json!({"type": "integer", "not": {"const": 1}});
         let err = normalize(&json!("1"), &schema).expect_err("excluded");
