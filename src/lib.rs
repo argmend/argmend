@@ -2057,9 +2057,8 @@ mod tests {
                 {"contains": {"const": "1"}}
             ]
         });
-        let kept = normalize(&json!(["1"]), &branches).expect("allof");
-        assert_eq!(kept.value, json!(["1"]));
-        assert!(kept.rewrites.is_empty());
+        let err = normalize(&json!(["1"]), &branches).expect_err("allof");
+        assert!(err.to_string().contains("misses contains"), "{err}");
     }
 
     #[test]
@@ -2067,18 +2066,22 @@ mod tests {
         let bounds = json!({
             "allOf": [{"type": "integer"}, {"minimum": 0}]
         });
-        let kept = normalize(&json!("-1"), &bounds).expect("below");
-        assert_eq!(kept.value, "-1");
-        assert!(kept.rewrites.is_empty());
+        let err = normalize(&json!("-1"), &bounds).expect_err("below");
+        assert!(
+            err.to_string().contains("outside the schema bounds"),
+            "{err}"
+        );
         let repaired = normalize(&json!("1"), &bounds).expect("inside");
         assert_eq!(repaired.value, 1);
+        let already = normalize(&json!(-1), &bounds).expect("already outside");
+        assert_eq!(already.value, -1);
+        assert!(already.rewrites.is_empty());
 
         let excluded = json!({
             "allOf": [{"type": "integer"}, {"not": {"const": 1}}]
         });
-        let kept = normalize(&json!("1"), &excluded).expect("excluded");
-        assert_eq!(kept.value, "1");
-        assert!(kept.rewrites.is_empty());
+        let err = normalize(&json!("1"), &excluded).expect_err("excluded");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
         let repaired = normalize(&json!("2"), &excluded).expect("other");
         assert_eq!(repaired.value, 2);
 
@@ -2296,8 +2299,8 @@ mod tests {
         assert_eq!(kept.value, 1);
         assert!(kept.rewrites.is_empty());
 
-        let unknown = json!({"type": "integer", "not": {"maximum": 0}});
-        let repaired = normalize(&json!("1"), &unknown).expect("unknown keyword");
+        let outside = json!({"type": "integer", "not": {"maximum": 0}});
+        let repaired = normalize(&json!("1"), &outside).expect("outside the excluded maximum");
         assert_eq!(repaired.value, 1);
 
         let object = json!({
@@ -2349,9 +2352,11 @@ mod tests {
                 {"properties": {"n": {"type": "boolean"}}}
             ]
         });
-        let kept = normalize(&json!({"n": "1"}), &clash).expect("allof");
-        assert_eq!(kept.value["n"], "1");
-        assert!(kept.rewrites.is_empty());
+        let err = normalize(&json!({"n": "1"}), &clash).expect_err("allof");
+        assert!(
+            err.to_string().contains("does not match the schema type"),
+            "{err}"
+        );
 
         let branches = json!({
             "oneOf": [
@@ -2504,15 +2509,22 @@ mod tests {
         let conflict = json!({
             "allOf": [{"type": "integer"}, {"type": "boolean"}]
         });
-        let kept = normalize(&json!("1"), &conflict).expect("conflict");
-        assert_eq!(kept.value, "1");
-        assert!(kept.rewrites.is_empty());
+        let err = normalize(&json!("1"), &conflict).expect_err("conflict");
+        assert!(
+            err.to_string().contains("does not match the schema type"),
+            "{err}"
+        );
 
         let text = json!({
             "allOf": [{"type": "string"}, {"type": "integer"}]
         });
-        let kept = normalize(&json!("1"), &text).expect("string and integer");
-        assert_eq!(kept.value, "1");
+        let err = normalize(&json!("1"), &text).expect_err("string and integer");
+        assert!(
+            err.to_string().contains("does not match the schema type"),
+            "{err}"
+        );
+        let kept = normalize(&json!("hello"), &text).expect("not an integer");
+        assert_eq!(kept.value, "hello");
         assert!(kept.rewrites.is_empty());
 
         let fields = json!({
@@ -2609,6 +2621,150 @@ mod tests {
         assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
         let repaired = normalize(&json!("5"), &one).expect("oneOf inside");
         assert_eq!(repaired.value, 5);
+    }
+
+    #[test]
+    fn not_honors_a_checkable_schema_that_has_no_type() {
+        let not_max = json!({"type": "integer", "not": {"maximum": 10}});
+        let err = normalize(&json!("5"), &not_max).expect_err("inside maximum");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
+        let repaired = normalize(&json!("11"), &not_max).expect("outside maximum");
+        assert_eq!(repaired.value, 11);
+
+        let not_min = json!({"type": "integer", "not": {"minimum": 1}});
+        let err = normalize(&json!("5"), &not_min).expect_err("inside minimum");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
+        let repaired = normalize(&json!("0"), &not_min).expect("below minimum");
+        assert_eq!(repaired.value, 0);
+
+        let exclusive = json!({"type": "integer", "not": {"exclusiveMaximum": 10}});
+        let err = normalize(&json!("9"), &exclusive).expect_err("below exclusive max");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
+        let repaired = normalize(&json!("10"), &exclusive).expect("at exclusive max");
+        assert_eq!(repaired.value, 10);
+
+        let unread = json!({"type": "integer", "not": {"maximum": "10"}});
+        let repaired = normalize(&json!("5"), &unread).expect("non-numeric bound");
+        assert_eq!(repaired.value, 5);
+
+        let multiple = json!({"type": "integer", "not": {"multipleOf": 2}});
+        let err = normalize(&json!("4"), &multiple).expect_err("multiple");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
+        let repaired = normalize(&json!("3"), &multiple).expect("not a multiple");
+        assert_eq!(repaired.value, 3);
+
+        let size = json!({
+            "items": {"type": "integer"},
+            "not": {"minItems": 1}
+        });
+        let err = normalize(&json!(["1"]), &size).expect_err("minItems");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
+        let repaired = normalize(&json!([]), &size).expect("empty");
+        assert_eq!(repaired.value, json!([]));
+
+        let unique = json!({
+            "items": {"type": "integer"},
+            "not": {"uniqueItems": true}
+        });
+        let err = normalize(&json!(["1", "2"]), &unique).expect_err("unique");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
+        let repaired = normalize(&json!(["1", "1"]), &unique).expect("duplicates");
+        assert_eq!(repaired.value, json!([1, 1]));
+
+        let contained = json!({
+            "items": {"type": "integer"},
+            "not": {"contains": {"const": 1}}
+        });
+        let err = normalize(&json!(["1"]), &contained).expect_err("contains");
+        assert!(err.to_string().contains("excluded by not"), "{err}");
+        let repaired = normalize(&json!(["2"]), &contained).expect("other item");
+        assert_eq!(repaired.value, json!([2]));
+    }
+
+    #[test]
+    fn split_all_of_rejects_a_coercion_a_later_branch_excludes() {
+        let all_of = json!({
+            "allOf": [{"type": "integer"}, {"maximum": 10}]
+        });
+        let err = normalize(&json!("11"), &all_of).expect_err("split");
+        assert!(
+            err.to_string().contains("outside the schema bounds"),
+            "{err}"
+        );
+        let repaired = normalize(&json!("5"), &all_of).expect("inside");
+        assert_eq!(repaired.value, 5);
+        let kept = normalize(&json!("hello"), &all_of).expect("not a number");
+        assert_eq!(kept.value, "hello");
+        assert!(kept.rewrites.is_empty());
+        let already = normalize(&json!(11), &all_of).expect("already a number");
+        assert_eq!(already.value, 11);
+        assert!(already.rewrites.is_empty());
+    }
+
+    #[test]
+    fn branch_bound_rejects_a_later_property_coercion() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"n": {"type": "integer"}},
+            "if": {
+                "properties": {"flag": {"const": true}},
+                "required": ["flag"]
+            },
+            "then": {"properties": {"n": {"maximum": 10}}},
+            "else": {"properties": {"n": {"maximum": 3}}}
+        });
+        let err = normalize(&json!({"flag": false, "n": "9"}), &schema).expect_err("else");
+        let text = err.to_string();
+        assert!(text.contains("'n'"), "{err}");
+        assert!(text.contains("outside the schema bounds"), "{err}");
+        let repaired = normalize(&json!({"flag": false, "n": "2"}), &schema).expect("inside else");
+        assert_eq!(repaired.value["n"], 2);
+        assert_eq!(repaired.value["flag"], false);
+
+        let err = normalize(&json!({"flag": true, "n": "11"}), &schema).expect_err("then");
+        let text = err.to_string();
+        assert!(text.contains("'n'"), "{err}");
+        assert!(text.contains("outside the schema bounds"), "{err}");
+        let repaired = normalize(&json!({"flag": true, "n": "4"}), &schema).expect("inside then");
+        assert_eq!(repaired.value["n"], 4);
+
+        let overlay = json!({
+            "properties": {"n": {"type": "integer"}},
+            "allOf": [{"properties": {"n": {"maximum": 3}}}]
+        });
+        let err = normalize(&json!({"n": "9"}), &overlay).expect_err("allOf property");
+        assert!(err.to_string().contains("'n'"), "{err}");
+        let repaired = normalize(&json!({"n": "2"}), &overlay).expect("allOf inside");
+        assert_eq!(repaired.value["n"], 2);
+
+        let rows = json!({
+            "items": {"type": "integer"},
+            "allOf": [{"items": {"maximum": 3}}]
+        });
+        let err = normalize(&json!(["9"]), &rows).expect_err("item bound");
+        let text = err.to_string();
+        assert!(text.contains("[0]"), "{err}");
+        assert!(text.contains("outside the schema bounds"), "{err}");
+        let repaired = normalize(&json!(["2"]), &rows).expect("item inside");
+        assert_eq!(repaired.value, json!([2]));
+
+        let tuple = json!({
+            "prefixItems": [{"type": "integer"}],
+            "allOf": [{"prefixItems": [{"maximum": 3}]}]
+        });
+        let err = normalize(&json!(["9"]), &tuple).expect_err("prefix bound");
+        assert!(err.to_string().contains("[0]"), "{err}");
+        let repaired = normalize(&json!(["2"]), &tuple).expect("prefix inside");
+        assert_eq!(repaired.value, json!([2]));
+
+        let draft4 = json!({
+            "items": [{"type": "integer"}],
+            "allOf": [{"items": [{"maximum": 3}]}]
+        });
+        let err = normalize(&json!(["9"]), &draft4).expect_err("draft4 tuple");
+        assert!(err.to_string().contains("[0]"), "{err}");
+        let repaired = normalize(&json!(["2"]), &draft4).expect("draft4 inside");
+        assert_eq!(repaired.value, json!([2]));
     }
 
     #[test]
