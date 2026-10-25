@@ -22,6 +22,9 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let (next, rewrites) = normalize_known(value, schema)?;
     if next != *value || !rewrites.is_empty() {
+        if let Some(reason) = applicator_field_failure(schema, value, &next) {
+            return Err(RepairError::Ambiguous(reason));
+        }
         if value.as_str().is_some() && violates_length(schema, value) {
             return Err(RepairError::Ambiguous(
                 "coerced string is outside the schema length".into(),
@@ -273,6 +276,8 @@ fn if_then_else(
 
 /// Apply every `allOf` branch. The result must still satisfy each branch.
 /// A [`RepairError`] from a branch is not discarded.
+/// A coercion that a later branch rejects is [`RepairError::Ambiguous`].
+/// It is not reported as the original value.
 fn all_of(value: &Value, schema: &Value) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let Some(branches) = single_applicator(schema, "allOf") else {
         return Ok(None);
@@ -285,17 +290,26 @@ fn all_of(value: &Value, schema: &Value) -> Result<Option<(Value, Vec<Rewrite>)>
     }
     let mut current = value.clone();
     let mut rewrites = Vec::new();
+    let mut coerced = false;
     for branch in branches {
         let (next, more) = normalize_child(&current, branch)?;
+        let changed = next != current || !more.is_empty();
         if !branch_accepts(branch, &next) {
+            if coerced || changed {
+                return Err(RepairError::Ambiguous(schema_rejection(branch, &next)));
+            }
             return Ok(None);
         }
+        coerced |= changed;
         current = next;
         rewrites.extend(more);
     }
     for branch in branches {
         let (next, _) = normalize_child(&current, branch)?;
         if next != current || !branch_accepts(branch, &next) {
+            if coerced || next != current {
+                return Err(RepairError::Ambiguous(schema_rejection(branch, &next)));
+            }
             return Ok(None);
         }
     }
@@ -364,6 +378,8 @@ fn exclusive_branch(
 
 /// A rewrite that satisfies `not` is refused.
 /// `not` with only an unrecognized keyword is not a match.
+/// A numeric bound, `multipleOf`, `uniqueItems`, `contains`, or a size
+/// limit counts once this crate can evaluate it.
 fn violates_not(schema: &Value, value: &Value) -> bool {
     let Some(not_schema) = schema.get("not") else {
         return false;
@@ -666,6 +682,205 @@ fn known_constraint(schema: &Value) -> bool {
         || schema.get("propertyNames").is_some()
         || schema.get("items").is_some()
         || schema.get("prefixItems").is_some()
+        || checkable_bound(schema)
+        || checkable_multiple(schema)
+        || schema.get("uniqueItems") == Some(&Value::Bool(true))
+        || checkable_contains(schema)
+        || checkable_size(schema)
+}
+
+fn checkable_bound(schema: &Value) -> bool {
+    ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
+        .into_iter()
+        .any(|key| match schema.get(key) {
+            Some(bound) if bound.is_boolean() => {
+                let pair = if key.ends_with("Minimum") {
+                    "minimum"
+                } else {
+                    "maximum"
+                };
+                schema.get(pair).is_some_and(checkable_number)
+            }
+            Some(bound) => checkable_number(bound),
+            None => false,
+        })
+}
+
+fn checkable_number(bound: &Value) -> bool {
+    bound.as_i64().is_some() || comparable_f64_bound(bound).is_some()
+}
+
+fn checkable_multiple(schema: &Value) -> bool {
+    let Some(multiple) = schema.get("multipleOf").and_then(Value::as_number) else {
+        return false;
+    };
+    let Some(factor) = multiple.as_f64() else {
+        return false;
+    };
+    factor.is_finite() && factor > 0.0 && parse_decimal(&multiple.to_string()).is_some()
+}
+
+fn checkable_contains(schema: &Value) -> bool {
+    schema.get("contains").is_some_and(Value::is_object) && contain_limits(schema).is_some()
+}
+
+fn checkable_size(schema: &Value) -> bool {
+    ["minItems", "maxItems", "minProperties", "maxProperties"]
+        .into_iter()
+        .any(|key| integer_limit(schema, key).is_some())
+}
+
+/// A property bound on `then`, `else`, or `allOf` is checked after the
+/// outer schema coerces that property. The branch schema alone leaves a
+/// numeric string unchanged, so the bound would not see the number.
+fn applicator_field_failure(schema: &Value, before: &Value, after: &Value) -> Option<String> {
+    let mut branches = Vec::new();
+    if schema.get("allOf").is_none()
+        && schema.get("oneOf").is_none()
+        && schema.get("anyOf").is_none()
+        && let Some(if_schema) = schema.get("if")
+    {
+        let take_then = matches!(
+            normalize_child(before, if_schema),
+            Ok((probed, _)) if branch_accepts(if_schema, &probed)
+        );
+        if take_then {
+            if let Some(then_schema) = schema.get("then") {
+                branches.push(then_schema);
+            }
+        } else if let Some(else_schema) = schema.get("else") {
+            branches.push(else_schema);
+        }
+    }
+    if let Some(items) = single_applicator(schema, "allOf") {
+        branches.extend(items.iter());
+    }
+    branches.into_iter().find_map(|branch| {
+        changed_field_failure(branch, before, after)
+            .or_else(|| changed_item_failure(branch, before, after))
+    })
+}
+
+fn changed_field_failure(schema: &Value, before: &Value, after: &Value) -> Option<String> {
+    let (Some(before_obj), Some(after_obj)) = (before.as_object(), after.as_object()) else {
+        return None;
+    };
+    let props = schema.get("properties").and_then(Value::as_object)?;
+    for (key, prop_schema) in props {
+        let (Some(prev), Some(next)) = (before_obj.get(key), after_obj.get(key)) else {
+            continue;
+        };
+        if prev == next || branch_accepts(prop_schema, next) {
+            continue;
+        }
+        return Some(format!("'{key}': {}", schema_rejection(prop_schema, next)));
+    }
+    None
+}
+
+fn changed_item_failure(schema: &Value, before: &Value, after: &Value) -> Option<String> {
+    let (Some(before_items), Some(after_items)) = (before.as_array(), after.as_array()) else {
+        return None;
+    };
+    if let Some(item_schema) = schema.get("items").filter(|item| item.is_object()) {
+        for (index, (prev, next)) in before_items.iter().zip(after_items.iter()).enumerate() {
+            if prev == next || branch_accepts(item_schema, next) {
+                continue;
+            }
+            return Some(format!(
+                "[{index}]: {}",
+                schema_rejection(item_schema, next)
+            ));
+        }
+    }
+    let positions = schema
+        .get("prefixItems")
+        .and_then(Value::as_array)
+        .or_else(|| schema.get("items").and_then(Value::as_array))?;
+    for (index, position) in positions.iter().enumerate() {
+        let (Some(prev), Some(next)) = (before_items.get(index), after_items.get(index)) else {
+            continue;
+        };
+        if prev == next || branch_accepts(position, next) {
+            continue;
+        }
+        return Some(format!("[{index}]: {}", schema_rejection(position, next)));
+    }
+    None
+}
+
+fn schema_rejection(schema: &Value, value: &Value) -> String {
+    if let (Some(obj), Some(props)) = (
+        value.as_object(),
+        schema.get("properties").and_then(Value::as_object),
+    ) {
+        for (key, prop_schema) in props {
+            if let Some(child) = obj.get(key)
+                && !branch_accepts(prop_schema, child)
+            {
+                return format!("'{key}': {}", schema_rejection(prop_schema, child));
+            }
+        }
+    }
+    if let (Some(items), Some(item_schema)) = (
+        value.as_array(),
+        schema.get("items").filter(|item| item.is_object()),
+    ) {
+        for (index, child) in items.iter().enumerate() {
+            if !branch_accepts(item_schema, child) {
+                return format!("[{index}]: {}", schema_rejection(item_schema, child));
+            }
+        }
+    }
+    constraint_failure(schema, value)
+        .unwrap_or("coerced value was rejected by the schema branch")
+        .to_string()
+}
+
+fn constraint_failure(schema: &Value, value: &Value) -> Option<&'static str> {
+    if violates_not(schema, value) {
+        return Some("coerced value is excluded by not");
+    }
+    if violates_bounds(schema, value) {
+        return Some("coerced value is outside the schema bounds");
+    }
+    if violates_multiple(schema, value) {
+        return Some("coerced value is not a multiple of the schema");
+    }
+    if violates_unique(schema, value) {
+        return Some("coerced value repeats an array item");
+    }
+    if violates_contains(schema, value) {
+        return Some("coerced value misses contains");
+    }
+    if violates_size(schema, value) {
+        return Some("coerced value is outside the schema size");
+    }
+    if violates_length(schema, value) {
+        return Some("coerced value is outside the schema length");
+    }
+    if violates_dependent(schema, value) {
+        return Some("coerced value misses a dependent property");
+    }
+    if property_names_refusal(schema, value).is_some() {
+        return Some("coerced value has a property name outside the schema");
+    }
+    let types = schema_type_names(schema);
+    if !types.is_empty() && !type_matches(&types, value) {
+        return Some("coerced value does not match the schema type");
+    }
+    if (schema.get("const").is_some() || schema.get("enum").is_some())
+        && !constraints_hold(schema, value)
+    {
+        return Some("coerced value is not a const or enum member");
+    }
+    if !required_holds(schema, value) {
+        return Some("coerced value misses a required property");
+    }
+    if value.is_string() && unchecked_string_keyword(schema) {
+        return Some("coerced string is outside an unchecked string keyword");
+    }
+    None
 }
 
 /// Type, `const`, `enum`, properties, array items, `required` names,
