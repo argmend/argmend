@@ -1793,6 +1793,22 @@ mod tests {
     }
 
     #[test]
+    fn unclosed_single_quote_does_not_finish_the_string() {
+        assert!(matches!(
+            repair_json("{a: 'src/main.rs"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(repair_json("'hello"), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("'"), RepairOutcome::Unfixable(_)));
+        match repair_json("{a: 'src/main.rs'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "src/main.rs");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn python_literals_become_json_values() {
         match repair_json("{a: True, b: False, c: None, items: [True, None]}") {
             RepairOutcome::Repaired { value, .. } => {

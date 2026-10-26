@@ -491,15 +491,17 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
             '\'' => {
                 out.push('"');
                 i += 1;
+                // A `'` that ends the value still closes it, and end of
+                // input does not. `\'` is an apostrophe, not a closer, and
+                // an unescaped `'` before a letter or digit stays in the value.
+                let mut closed = false;
                 while i < len {
                     if chars[i] == '\\' {
                         i += 1;
                         if i < len {
                             // `\'` is an apostrophe. Copied through, it is
                             // not a legal JSON escape, so the backslash stays
-                            // off. An unescaped `'` followed by a letter or
-                            // digit also stays in the value. A delimiter
-                            // still closes the string.
+                            // off.
                             if chars[i] == '\'' {
                                 out.push('\'');
                             } else {
@@ -519,6 +521,7 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                             i += 1;
                             continue;
                         }
+                        closed = true;
                         break;
                     }
                     match chars[i] {
@@ -530,9 +533,11 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                     }
                     i += 1;
                 }
-                out.push('"');
-                if i < len {
-                    i += 1; // skip closing '
+                if closed {
+                    out.push('"');
+                    if i < len {
+                        i += 1; // skip closing '
+                    }
                 }
             }
             other => {
