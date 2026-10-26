@@ -486,12 +486,15 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
             '\'' => {
                 out.push('"');
                 i += 1;
-                while i < len && chars[i] != '\'' {
+                while i < len {
                     if chars[i] == '\\' {
                         i += 1;
                         if i < len {
                             // `\'` is an apostrophe. Copied through, it is
-                            // not a legal JSON escape, so the repair failed.
+                            // not a legal JSON escape, so the backslash stays
+                            // off. An unescaped `'` followed by a letter or
+                            // digit also stays in the value. A delimiter
+                            // still closes the string.
                             if chars[i] == '\'' {
                                 out.push('\'');
                             } else {
@@ -500,16 +503,27 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                             }
                             i += 1;
                         }
-                    } else {
-                        match chars[i] {
-                            '"' => out.push_str("\\\""),
-                            '\n' => out.push_str("\\n"),
-                            '\r' => out.push_str("\\r"),
-                            '\t' => out.push_str("\\t"),
-                            other => out.push(other),
-                        }
-                        i += 1;
+                        continue;
                     }
+                    if chars[i] == '\'' {
+                        let inside = chars
+                            .get(i + 1)
+                            .is_some_and(|next| next.is_ascii_alphanumeric());
+                        if inside {
+                            out.push('\'');
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    match chars[i] {
+                        '"' => out.push_str("\\\""),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        other => out.push(other),
+                    }
+                    i += 1;
                 }
                 out.push('"');
                 if i < len {

@@ -1430,6 +1430,49 @@ mod tests {
     }
 
     #[test]
+    fn single_quoted_apostrophe_stays_in_the_value() {
+        match repair_json(r"{'a': 'x', 'b': 'O'Reilly'}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], "O'Reilly");
+                assert!(value.get("Reilly").is_none(), "{value}");
+                assert_eq!(value.as_object().expect("object").len(), 2);
+                assert!(
+                    !repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{"msg": 'don't'}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["msg"], "don't");
+                assert!(value.get("t").is_none(), "{value}");
+                assert_eq!(value.as_object().expect("object").len(), 1);
+                assert!(
+                    !repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r"{'a': 'abc', 'b': 'def'}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "abc");
+                assert_eq!(value["b"], "def");
+                assert!(repairs.iter().any(|item| {
+                    item.kind == RewriteKind::Syntax && item.detail.contains("single quotes")
+                }));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn python_literals_become_json_values() {
         match repair_json("{a: True, b: False, c: None, items: [True, None]}") {
             RepairOutcome::Repaired { value, .. } => {
