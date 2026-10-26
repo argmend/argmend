@@ -31,7 +31,9 @@ const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name
 /// `additionalProperties: false` does not look inside those branches. A key
 /// one of them names is ambiguous instead of dropped. A path alias does not
 /// rename a key one of those branches lists under `properties`. The same
-/// refusal applies when the object is open.
+/// refusal applies when the object is open. An unresolved `$ref` or
+/// `$dynamicRef` on this object, or on one of those branches, blocks
+/// dropping a key. The ref is not resolved.
 pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError> {
     let (next, rewrites) = normalize_child(value, schema)?;
     Ok(Repaired {
@@ -2113,6 +2115,9 @@ struct ApplicatorCoverage {
     /// An applied branch has `patternProperties`. The pattern is not matched
     /// here, so a remaining key may already have been evaluated.
     open_pattern: bool,
+    /// This object or an applicator branch contains `$ref` or `$dynamicRef`.
+    /// The ref is not resolved, so a remaining key may be named by it.
+    open_ref: bool,
 }
 
 fn applicator_coverage(
@@ -2124,11 +2129,53 @@ fn applicator_coverage(
     Ok(coverage)
 }
 
+/// Records `$ref` or `$dynamicRef` on this object or an applicator branch.
+/// Acceptance is not required. The ref is not resolved. `properties`,
+/// `$defs`, and `not` are not walked.
+fn note_unresolved_ref(schema: &Value, coverage: &mut ApplicatorCoverage) {
+    if coverage.open_ref {
+        return;
+    }
+    let Some(map) = schema.as_object() else {
+        return;
+    };
+    if map.contains_key("$ref") || map.contains_key("$dynamicRef") {
+        coverage.open_ref = true;
+        return;
+    }
+    for keyword in ["allOf", "anyOf", "oneOf", "if", "then", "else"] {
+        match map.get(keyword) {
+            Some(Value::Array(branches)) => {
+                for branch in branches {
+                    note_unresolved_ref(branch, coverage);
+                    if coverage.open_ref {
+                        return;
+                    }
+                }
+            }
+            Some(child) => {
+                note_unresolved_ref(child, coverage);
+                if coverage.open_ref {
+                    return;
+                }
+            }
+            None => {}
+        }
+    }
+    for (_, sub) in dependent_object_schemas(schema) {
+        note_unresolved_ref(sub, coverage);
+        if coverage.open_ref {
+            return;
+        }
+    }
+}
+
 fn collect_applicators(
     schema: &Value,
     instance: &Value,
     coverage: &mut ApplicatorCoverage,
 ) -> Result<(), RepairError> {
+    note_unresolved_ref(schema, coverage);
     let Some(map) = schema.as_object() else {
         return Ok(());
     };
@@ -2299,6 +2346,12 @@ fn refuse_covered_unknown(
         let key = &unknown[0].0;
         return Err(RepairError::Ambiguous(format!(
             "unknown key '{key}' may be evaluated by patternProperties"
+        )));
+    }
+    if coverage.open_ref && (additional || unevaluated) {
+        let key = &unknown[0].0;
+        return Err(RepairError::Ambiguous(format!(
+            "unknown key '{key}' may be evaluated by an unresolved ref"
         )));
     }
     Ok(())

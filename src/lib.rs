@@ -275,7 +275,8 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 /// A schema that is the JSON boolean `true` or `false` is not applied. A
 /// string is not parsed again when the schema asks for an object or an
 /// array. An unresolved `$ref` does not block a sibling keyword this crate
-/// can check. A checkable sibling, such as `maximum`, still applies.
+/// can check. A checkable sibling, such as `maximum`, still applies. A closed
+/// object does not drop a key an unresolved `$ref` or `$dynamicRef` might name.
 ///
 /// Blank input is `{}`, `[]`, or null, matching the schema type.
 ///
@@ -2501,6 +2502,130 @@ mod tests {
         });
         let repaired = normalize(&json!(["1", "2"]), &items).expect("items");
         assert_eq!(repaired.value, json!([1, 2]));
+    }
+
+    #[test]
+    fn unresolved_ref_blocks_an_unknown_key_drop() {
+        fn expect_ref(schema: &Value) {
+            let err =
+                normalize(&json!({"path": "a", "line": 3}), schema).expect_err("unresolved ref");
+            assert_eq!(
+                err.to_string(),
+                "unknown key 'line' may be evaluated by an unresolved ref"
+            );
+        }
+
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "anyOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "$ref": "#/$defs/x"
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"$dynamicRef": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "oneOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "if": {"$ref": "#/$defs/x"}
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "dependentSchemas": {"mode": {"$ref": "#/$defs/x"}}
+        }));
+
+        let kept = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{
+                "properties": {"line": {"type": "integer"}},
+                "$ref": "#/$defs/x"
+            }]
+        });
+        let repaired = normalize(&json!({"path": "a", "line": 3}), &kept).expect("evaluated");
+        assert_eq!(repaired.value, json!({"path": "a", "line": 3}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .all(|item| item.kind != RewriteKind::DroppedUnknown)
+        );
+        let err = normalize(&json!({"path": "a", "line": 3, "note": 1}), &kept).expect_err("other");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'note' may be evaluated by an unresolved ref"
+        );
+
+        let defs_only = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "$defs": {"x": {"$ref": "#/$defs/y"}}
+        });
+        let repaired = normalize(&json!({"path": "a", "line": 3}), &defs_only).expect("defs");
+        assert_eq!(repaired.value, json!({"path": "a"}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::DroppedUnknown)
+        );
+
+        let inside_property = json!({
+            "type": "object",
+            "properties": {"path": {"$ref": "#/$defs/x"}},
+            "unevaluatedProperties": false
+        });
+        let repaired =
+            normalize(&json!({"path": "a", "line": 3}), &inside_property).expect("property ref");
+        assert_eq!(repaired.value, json!({"path": "a"}));
+
+        let patterned = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{
+                "properties": {"line": {"type": "integer"}},
+                "patternProperties": {"^x-": {"type": "string"}},
+                "$ref": "#/$defs/x"
+            }]
+        });
+        let err = normalize(&json!({"path": "a", "note": "hi"}), &patterned).expect_err("pattern");
+        assert!(
+            err.to_string().contains("evaluated by patternProperties"),
+            "{err}"
+        );
     }
 
     #[test]
