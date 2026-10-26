@@ -2190,7 +2190,9 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 /// digit stays in the value. Any other `'` closes the string, and an
 /// unclosed string does not gain a closer. Quote repair runs after this
 /// stage, so `//` inside `'http://example.com'` is part of the value.
-/// A `#` inside a string is also kept.
+/// A `#` inside a string is also kept. Curly double quotes are skipped
+/// the same way, because quote normalization runs later. Curly single
+/// quotes are not strings.
 pub(crate) fn strip_json_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -2248,6 +2250,18 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                 }
                 if i < len {
                     out.push('\'');
+                    i += 1;
+                }
+            }
+            '\u{201c}' => {
+                out.push('\u{201c}');
+                i += 1;
+                while i < len && chars[i] != '\u{201d}' {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    out.push('\u{201d}');
                     i += 1;
                 }
             }
@@ -2396,6 +2410,46 @@ mod tests {
             repair_tool_call_json("{\u{2018}a\u{2019}: 1}"),
             RepairOutcome::Unfixable(_)
         ));
+    }
+
+    #[test]
+    fn curly_double_quotes_keep_an_interior_comment() {
+        let line = "{\u{201c}note\u{201d}: \u{201c}see // this\u{201d}}";
+        match repair_tool_call_json(line) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["note"], "see // this");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let block = "{\u{201c}note\u{201d}: \u{201c}keep /* this */\u{201d}}";
+        match repair_tool_call_json(block) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["note"], "keep /* this */");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let url = "{\u{201c}url\u{201d}: \u{201c}http://example.com/a\u{201d}}";
+        match repair_tool_call_json(url) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["url"], "http://example.com/a");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let hash = "{\u{201c}note\u{201d}: \u{201c}keep # tag\u{201d}}";
+        match repair_tool_call_json(hash) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["note"], "keep # tag");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        let tail = "{\u{201c}note\u{201d}: \u{201c}see\u{201d} // tail}";
+        match crate::repair_json(tail) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["note"], "see");
+                assert!(!value.to_string().contains("tail"));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
     }
 
     #[test]
