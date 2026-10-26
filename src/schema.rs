@@ -451,9 +451,8 @@ fn violates_not(schema: &Value, value: &Value) -> bool {
     known_constraint(not_schema) && branch_accepts(not_schema, value)
 }
 
-/// Inclusive `minimum` / `maximum`, numeric exclusive bounds, and the
-/// draft-04 boolean form of `exclusiveMinimum` / `exclusiveMaximum`.
-/// A bound that is not an exact finite number is ignored.
+/// `uniqueItems: true` refuses an array that repeats an item.
+/// A missing flag, or any flag other than `true`, is not a failure.
 fn violates_unique(schema: &Value, value: &Value) -> bool {
     if schema.get("uniqueItems") != Some(&Value::Bool(true)) {
         return false;
