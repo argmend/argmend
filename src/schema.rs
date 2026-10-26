@@ -25,6 +25,9 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
         if let Some(reason) = applicator_field_failure(schema, value, &next) {
             return Err(RepairError::Ambiguous(reason));
         }
+        if let Some(reason) = applicator_selection_failure(schema, &next) {
+            return Err(RepairError::Ambiguous(reason));
+        }
         if value.as_str().is_some() && violates_length(schema, value) {
             return Err(RepairError::Ambiguous(
                 "coerced string is outside the schema length".into(),
@@ -206,7 +209,9 @@ fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
 /// When `if` matches, apply `then`. Otherwise apply `else`.
 /// The `then` result must still match `if`.
 /// A refusing `if` probe does not match, so `else` still runs.
-/// An error from the matched `then` or `else` branch is returned.
+/// An error from the matched branch is kept when that side still applies.
+/// It is dropped only when a keyword outside `if`, `then`, and `else`
+/// rewrites the value onto the other side.
 fn if_then_else(
     value: &Value,
     schema: &Value,
@@ -245,11 +250,16 @@ fn if_then_else(
             }
             return Ok(Some((probed, probe_rewrites)));
         };
-        let (next, more) = normalize_child(&probed, then_schema)?;
+        let (next, more) = match normalize_child(&probed, then_schema) {
+            Ok(pair) => pair,
+            Err(err) => return discard_conditional_error(value, schema, true, err),
+        };
         let coerced = probed != *value || !probe_rewrites.is_empty();
         if !branch_accepts(then_schema, &next) && coerced {
             // The `if` probe already coerced, so `then` did not see the original value.
-            normalize_child(value, then_schema)?;
+            if let Err(err) = normalize_child(value, then_schema) {
+                return discard_conditional_error(value, schema, true, err);
+            }
         }
         if !branch_accepts(if_schema, &next) || !branch_accepts(then_schema, &next) {
             return Ok(None);
@@ -264,7 +274,10 @@ fn if_then_else(
     let Some(else_schema) = else_schema else {
         return Ok(None);
     };
-    let (next, rewrites) = normalize_child(value, else_schema)?;
+    let (next, rewrites) = match normalize_child(value, else_schema) {
+        Ok(pair) => pair,
+        Err(err) => return discard_conditional_error(value, schema, false, err),
+    };
     if !branch_accepts(else_schema, &next) {
         return Ok(None);
     }
@@ -272,6 +285,36 @@ fn if_then_else(
         return Ok(None);
     }
     Ok(Some((next, rewrites)))
+}
+
+/// Keep a `then` or `else` error when `if` still selects that side.
+/// Drop it only after a keyword outside `if`, `then`, and `else` rewrites
+/// the value onto the other side. `if` can be the schema that coerces.
+fn discard_conditional_error(
+    value: &Value,
+    schema: &Value,
+    then_side: bool,
+    err: RepairError,
+) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
+    let Some(if_schema) = schema.get("if") else {
+        return Err(err);
+    };
+    let mut stripped = schema.clone();
+    if let Some(map) = stripped.as_object_mut() {
+        map.remove("if");
+        map.remove("then");
+        map.remove("else");
+    }
+    let (coerced, rewrites) = normalize_child(value, &stripped)?;
+    if coerced == *value && rewrites.is_empty() {
+        return Err(err);
+    }
+    let keep = match settled(if_schema, &coerced) {
+        Settled::Yes => then_side,
+        Settled::No(_) => !then_side,
+        Settled::Inconclusive => false,
+    };
+    if keep { Err(err) } else { Ok(None) }
 }
 
 /// Apply every `allOf` branch. The result must still satisfy each branch.
@@ -730,35 +773,384 @@ fn checkable_size(schema: &Value) -> bool {
         .any(|key| integer_limit(schema, key).is_some())
 }
 
-/// A property bound on `then`, `else`, or `allOf` is checked after the
-/// outer schema coerces that property. The branch schema alone leaves a
-/// numeric string unchanged, so the bound would not see the number.
+/// An `allOf` property or item bound is checked after the outer schema
+/// coerces that value. `if` / `then` / `else` is chosen later, on the
+/// coerced value: the original string can satisfy `if` when the number
+/// does not.
 fn applicator_field_failure(schema: &Value, before: &Value, after: &Value) -> Option<String> {
     let mut branches = Vec::new();
-    if schema.get("allOf").is_none()
-        && schema.get("oneOf").is_none()
-        && schema.get("anyOf").is_none()
-        && let Some(if_schema) = schema.get("if")
-    {
-        let take_then = matches!(
-            normalize_child(before, if_schema),
-            Ok((probed, _)) if branch_accepts(if_schema, &probed)
-        );
-        if take_then {
-            if let Some(then_schema) = schema.get("then") {
-                branches.push(then_schema);
-            }
-        } else if let Some(else_schema) = schema.get("else") {
-            branches.push(else_schema);
-        }
-    }
     if let Some(items) = single_applicator(schema, "allOf") {
-        branches.extend(items.iter());
+        // A pattern in this branch makes its bounds unevaluable. A sibling
+        // branch with no string keyword is still a miss.
+        branches.extend(
+            items
+                .iter()
+                .filter(|branch| !unevaluable_string_keyword(branch)),
+        );
     }
     branches.into_iter().find_map(|branch| {
         changed_field_failure(branch, before, after)
             .or_else(|| changed_item_failure(branch, before, after))
     })
+}
+
+/// Applicator bounds are judged after the outer schema coerces.
+///
+/// `oneOf`, `anyOf`, `allOf`, and `if` sit on this schema. `contains` and a
+/// dependent schema can hide the same kind of bound, and the branch walker
+/// does not enter them. An inconclusive keyword is not a miss.
+fn applicator_selection_failure(schema: &Value, value: &Value) -> Option<String> {
+    match selection_settled(schema, value) {
+        Settled::No(reason) => return Some(reason),
+        Settled::Yes | Settled::Inconclusive => {}
+    }
+    match contains_settled(schema, value) {
+        Settled::No(reason) => return Some(reason),
+        Settled::Yes | Settled::Inconclusive => {}
+    }
+    match dependent_settled(schema, value) {
+        Settled::No(reason) => Some(reason),
+        Settled::Yes | Settled::Inconclusive => None,
+    }
+}
+
+enum Settled {
+    Yes,
+    No(String),
+    /// An unchecked string keyword is in this schema. It is not a match
+    /// and not a miss.
+    Inconclusive,
+}
+
+fn selection_settled(schema: &Value, value: &Value) -> Settled {
+    let mut inconclusive = false;
+    for (key, exactly_one) in [("oneOf", true), ("anyOf", false)] {
+        match counted_branch_failure(schema, value, key, exactly_one) {
+            Settled::Yes => {}
+            Settled::Inconclusive => inconclusive = true,
+            Settled::No(reason) => return Settled::No(reason),
+        }
+    }
+    match all_of_settled(schema, value) {
+        Settled::Yes => {}
+        Settled::Inconclusive => inconclusive = true,
+        Settled::No(reason) => return Settled::No(reason),
+    }
+    match conditional_settled(schema, value) {
+        Settled::Yes => {}
+        Settled::Inconclusive => inconclusive = true,
+        Settled::No(reason) => return Settled::No(reason),
+    }
+    if inconclusive {
+        Settled::Inconclusive
+    } else {
+        Settled::Yes
+    }
+}
+
+fn counted_branch_failure(schema: &Value, value: &Value, key: &str, exactly_one: bool) -> Settled {
+    let Some(branches) = schema.get(key).and_then(Value::as_array) else {
+        return Settled::Yes;
+    };
+    let mut yes = 0;
+    let mut inconclusive = false;
+    let mut first_miss = None;
+    for branch in branches {
+        match settled(branch, value) {
+            Settled::Yes => yes += 1,
+            Settled::Inconclusive => inconclusive = true,
+            Settled::No(reason) => {
+                if first_miss.is_none() {
+                    first_miss = Some(reason);
+                }
+            }
+        }
+    }
+    if !exactly_one && yes > 0 {
+        return Settled::Yes;
+    }
+    if exactly_one && yes > 1 {
+        return Settled::No("coerced value matches more than one schema branch".to_string());
+    }
+    if inconclusive {
+        return Settled::Inconclusive;
+    }
+    if exactly_one && yes == 1 {
+        return Settled::Yes;
+    }
+    Settled::No(
+        first_miss.unwrap_or_else(|| "coerced value was rejected by the schema branch".to_string()),
+    )
+}
+
+fn all_of_settled(schema: &Value, value: &Value) -> Settled {
+    let Some(branches) = schema.get("allOf").and_then(Value::as_array) else {
+        return Settled::Yes;
+    };
+    let mut inconclusive = false;
+    for branch in branches {
+        match settled(branch, value) {
+            Settled::Yes => {}
+            Settled::Inconclusive => inconclusive = true,
+            Settled::No(reason) => return Settled::No(reason),
+        }
+    }
+    if inconclusive {
+        Settled::Inconclusive
+    } else {
+        Settled::Yes
+    }
+}
+
+fn conditional_settled(schema: &Value, value: &Value) -> Settled {
+    let Some(if_schema) = schema.get("if") else {
+        return Settled::Yes;
+    };
+    let then_schema = schema.get("then");
+    let else_schema = schema.get("else");
+    if then_schema.is_none() && else_schema.is_none() {
+        return Settled::Yes;
+    }
+    match settled(if_schema, value) {
+        Settled::Yes => match then_schema {
+            Some(side) => settled(side, value),
+            None => Settled::Yes,
+        },
+        Settled::No(_) => match else_schema {
+            Some(side) => settled(side, value),
+            None => Settled::Yes,
+        },
+        // Which side applies is unknown. A value both sides reject is still out.
+        Settled::Inconclusive => {
+            let (Some(then_schema), Some(else_schema)) = (then_schema, else_schema) else {
+                return Settled::Inconclusive;
+            };
+            match (settled(then_schema, value), settled(else_schema, value)) {
+                (Settled::No(reason), Settled::No(_)) => Settled::No(reason),
+                _ => Settled::Inconclusive,
+            }
+        }
+    }
+}
+
+/// Leaf constraints, nested applicators, and nested properties or items.
+/// This does not coerce. A string keyword on this object stays inconclusive
+/// so a `pattern` beside a bound is not a miss. A keyword that sits only
+/// under `allOf`, `oneOf`, `anyOf`, `if`, `then`, or `else` does not hide
+/// a sibling applicator: a conclusive miss still wins. A keyword in one
+/// array slot or dependent entry does not hide a later slot or entry.
+fn settled(schema: &Value, value: &Value) -> Settled {
+    if unevaluable_outside_applicators(schema) {
+        return settle_past_unevaluable(schema, value);
+    }
+    if !branch_accepts(schema, value) {
+        return Settled::No(schema_rejection(schema, value));
+    }
+    let mut inconclusive = false;
+    match selection_settled(schema, value) {
+        Settled::Yes => {}
+        Settled::Inconclusive => inconclusive = true,
+        Settled::No(reason) => return Settled::No(reason),
+    }
+    match contains_settled(schema, value) {
+        Settled::Yes => {}
+        Settled::Inconclusive => inconclusive = true,
+        Settled::No(reason) => return Settled::No(reason),
+    }
+    match nested_value_failure(schema, value) {
+        Settled::Yes => {}
+        Settled::Inconclusive => inconclusive = true,
+        Settled::No(reason) => return Settled::No(reason),
+    }
+    if inconclusive {
+        Settled::Inconclusive
+    } else {
+        Settled::Yes
+    }
+}
+
+/// A string keyword or unresolved `$ref` outside the applicators is not a
+/// match or a miss. Selection still runs first. `contains`, dependent
+/// entries, array slots, and size limits still run, so a keyword in one
+/// slot does not hide a later conclusive miss. This path does not call
+/// [`branch_accepts`]: a `pattern` beside a bound in one property would
+/// become a false miss.
+fn settle_past_unevaluable(schema: &Value, value: &Value) -> Settled {
+    if let Settled::No(reason) = selection_settled(schema, value) {
+        return Settled::No(reason);
+    }
+    if let Settled::No(reason) = contains_settled(schema, value) {
+        return Settled::No(reason);
+    }
+    if let Settled::No(reason) = dependent_settled(schema, value) {
+        return Settled::No(reason);
+    }
+    if let Some(items) = value.as_array()
+        && let Settled::No(reason) = nested_items(schema, items)
+    {
+        return Settled::No(reason);
+    }
+    if violates_size(schema, value) {
+        return Settled::No("coerced value is outside the schema size".to_string());
+    }
+    if forbidden_extra_item(schema, value) {
+        return Settled::No("coerced value was rejected by the schema branch".to_string());
+    }
+    Settled::Inconclusive
+}
+
+fn forbidden_extra_item(schema: &Value, value: &Value) -> bool {
+    let Some(items) = value.as_array() else {
+        return false;
+    };
+    let Some((positions, tail)) = tuple_positions(schema) else {
+        return false;
+    };
+    matches!(tail, ArrayTail::Forbid) && items.len() > positions.len()
+}
+
+/// `contains` counted with [`settled`], so an applicator under it can miss.
+/// An unevaluable item does not erase a count that is already inside
+/// `minContains` and `maxContains`, and it is not itself a miss.
+fn contains_settled(schema: &Value, value: &Value) -> Settled {
+    let Some(contains) = schema.get("contains").filter(|schema| schema.is_object()) else {
+        return Settled::Yes;
+    };
+    let Some(items) = value.as_array() else {
+        return Settled::Yes;
+    };
+    let Some((min, max)) = contain_limits(schema) else {
+        return Settled::Yes;
+    };
+    let mut yes = 0u64;
+    let mut inconclusive = 0u64;
+    for item in items {
+        match settled(contains, item) {
+            Settled::Yes => yes += 1,
+            Settled::No(_) => {}
+            Settled::Inconclusive => inconclusive += 1,
+        }
+    }
+    if max.is_some_and(|limit| yes > limit) {
+        return Settled::No("coerced value misses contains".to_string());
+    }
+    let within_max = match max {
+        None => true,
+        Some(limit) => yes.saturating_add(inconclusive) <= limit,
+    };
+    if yes >= min && within_max {
+        return Settled::Yes;
+    }
+    if inconclusive > 0 {
+        return Settled::Inconclusive;
+    }
+    Settled::No("coerced value misses contains".to_string())
+}
+
+/// Active `dependentSchemas` or schema-form `dependencies`, judged against
+/// the whole object. An array of required names is not a subschema.
+/// An inconclusive entry does not hide a later conclusive miss.
+fn dependent_settled(schema: &Value, value: &Value) -> Settled {
+    let Some(obj) = value.as_object() else {
+        return Settled::Yes;
+    };
+    let mut inconclusive = false;
+    for (name, sub) in dependent_object_schemas(schema) {
+        if !obj.contains_key(name) {
+            continue;
+        }
+        match settled(sub, value) {
+            Settled::Yes => {}
+            Settled::Inconclusive => inconclusive = true,
+            Settled::No(reason) => return Settled::No(reason),
+        }
+    }
+    if inconclusive {
+        Settled::Inconclusive
+    } else {
+        Settled::Yes
+    }
+}
+
+fn nested_value_failure(schema: &Value, value: &Value) -> Settled {
+    if let Some(obj) = value.as_object() {
+        if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+            for (key, prop_schema) in props {
+                let Some(child) = obj.get(key) else {
+                    continue;
+                };
+                if let Some(failure) = nested_child(settled(prop_schema, child), key) {
+                    return failure;
+                }
+            }
+        }
+        if let Some(extra) = additional_properties_schema(schema) {
+            let known = schema.get("properties").and_then(Value::as_object);
+            for (key, child) in obj {
+                if known.is_some_and(|props| props.contains_key(key)) {
+                    continue;
+                }
+                if let Some(failure) = nested_child(settled(extra, child), key) {
+                    return failure;
+                }
+            }
+        }
+        match dependent_settled(schema, value) {
+            Settled::Yes => {}
+            other => return other,
+        }
+    }
+    let Some(items) = value.as_array() else {
+        return Settled::Yes;
+    };
+    nested_items(schema, items)
+}
+
+fn nested_child(settled: Settled, key: &str) -> Option<Settled> {
+    match settled {
+        Settled::Yes => None,
+        Settled::No(reason) => Some(Settled::No(format!("'{key}': {reason}"))),
+        Settled::Inconclusive => Some(Settled::Inconclusive),
+    }
+}
+
+fn nested_items(schema: &Value, items: &[Value]) -> Settled {
+    if let Some((positions, tail)) = tuple_positions(schema) {
+        return settle_elements(items, |index| match positions.get(index) {
+            Some(position) => Some(position),
+            None => match tail {
+                ArrayTail::Schema(rest) => Some(rest),
+                ArrayTail::Keep | ArrayTail::Forbid => None,
+            },
+        });
+    }
+    let Some(item_schema) = schema.get("items").filter(|item| item.is_object()) else {
+        return Settled::Yes;
+    };
+    settle_elements(items, |_| Some(item_schema))
+}
+
+/// An inconclusive element does not hide a later element this crate can reject.
+fn settle_elements<'a>(
+    items: &[Value],
+    mut schema_at: impl FnMut(usize) -> Option<&'a Value>,
+) -> Settled {
+    let mut inconclusive = false;
+    for (index, child) in items.iter().enumerate() {
+        let Some(position) = schema_at(index) else {
+            continue;
+        };
+        match settled(position, child) {
+            Settled::Yes => {}
+            Settled::Inconclusive => inconclusive = true,
+            Settled::No(reason) => return Settled::No(format!("[{index}]: {reason}")),
+        }
+    }
+    if inconclusive {
+        Settled::Inconclusive
+    } else {
+        Settled::Yes
+    }
 }
 
 fn changed_field_failure(schema: &Value, before: &Value, after: &Value) -> Option<String> {
@@ -809,6 +1201,34 @@ fn changed_item_failure(schema: &Value, before: &Value, after: &Value) -> Option
     None
 }
 
+fn item_rejection(schema: &Value, items: &[Value]) -> Option<String> {
+    if let Some((positions, tail)) = tuple_positions(schema) {
+        for (index, child) in items.iter().enumerate() {
+            let position = match positions.get(index) {
+                Some(position) => position,
+                None => match tail {
+                    ArrayTail::Schema(rest) => rest,
+                    ArrayTail::Keep | ArrayTail::Forbid => continue,
+                },
+            };
+            if !branch_accepts(position, child) {
+                return Some(format!("[{index}]: {}", schema_rejection(position, child)));
+            }
+        }
+        return None;
+    }
+    let item_schema = schema.get("items").filter(|item| item.is_object())?;
+    for (index, child) in items.iter().enumerate() {
+        if !branch_accepts(item_schema, child) {
+            return Some(format!(
+                "[{index}]: {}",
+                schema_rejection(item_schema, child)
+            ));
+        }
+    }
+    None
+}
+
 fn schema_rejection(schema: &Value, value: &Value) -> String {
     if let (Some(obj), Some(props)) = (
         value.as_object(),
@@ -822,15 +1242,10 @@ fn schema_rejection(schema: &Value, value: &Value) -> String {
             }
         }
     }
-    if let (Some(items), Some(item_schema)) = (
-        value.as_array(),
-        schema.get("items").filter(|item| item.is_object()),
-    ) {
-        for (index, child) in items.iter().enumerate() {
-            if !branch_accepts(item_schema, child) {
-                return format!("[{index}]: {}", schema_rejection(item_schema, child));
-            }
-        }
+    if let Some(items) = value.as_array()
+        && let Some(reason) = item_rejection(schema, items)
+    {
+        return reason;
     }
     constraint_failure(schema, value)
         .unwrap_or("coerced value was rejected by the schema branch")
@@ -917,6 +1332,63 @@ fn unchecked_string_keyword(schema: &Value) -> bool {
             "pattern" | "format" | "contentEncoding" | "contentMediaType" | "contentSchema"
         ) || (key == "not" && unchecked_string_keyword(child))
     })
+}
+
+/// Same keywords as [`unchecked_string_keyword`], anywhere a later
+/// [`settled`] check would look. Property names are not keywords.
+/// `$defs` is skipped. `$ref` is not resolved, so it is inconclusive.
+/// `const`, `enum`, and `example` are instance data, same as `default`
+/// and `examples`.
+fn unevaluable_string_keyword(schema: &Value) -> bool {
+    unevaluable_keyword(schema, true)
+}
+
+/// Like [`unevaluable_string_keyword`], but a keyword that appears only
+/// under an applicator is left for [`selection_settled`].
+fn unevaluable_outside_applicators(schema: &Value) -> bool {
+    unevaluable_keyword(schema, false)
+}
+
+fn unevaluable_keyword(schema: &Value, enter_applicators: bool) -> bool {
+    match schema {
+        Value::Array(items) => items
+            .iter()
+            .any(|item| unevaluable_keyword(item, enter_applicators)),
+        Value::Object(map) => map.iter().any(|(key, child)| {
+            if matches!(
+                key.as_str(),
+                "pattern" | "format" | "contentEncoding" | "contentMediaType" | "contentSchema"
+            ) {
+                return true;
+            }
+            if matches!(key.as_str(), "$ref" | "$dynamicRef") {
+                return true;
+            }
+            if is_schema_annotation(key) {
+                return false;
+            }
+            if !enter_applicators
+                && matches!(
+                    key.as_str(),
+                    "allOf" | "oneOf" | "anyOf" | "if" | "then" | "else"
+                )
+            {
+                return false;
+            }
+            if matches!(
+                key.as_str(),
+                "properties" | "patternProperties" | "dependentSchemas" | "dependencies"
+            ) {
+                return child.as_object().is_some_and(|props| {
+                    props
+                        .values()
+                        .any(|value| unevaluable_keyword(value, enter_applicators))
+                });
+            }
+            unevaluable_keyword(child, enter_applicators)
+        }),
+        _ => false,
+    }
 }
 
 /// `minLength` and `maxLength` count characters. A limit that is not an
@@ -1085,6 +1557,11 @@ fn violates_contains(schema: &Value, value: &Value) -> bool {
     let Some((min, max)) = contain_limits(schema) else {
         return false;
     };
+    // An applicator this walker cannot enter is not a hit.
+    // [`contains_settled`] counts those items.
+    if contains_count_needs_settled(contains) {
+        return false;
+    }
     let count = u64::try_from(
         items
             .iter()
@@ -1093,6 +1570,60 @@ fn violates_contains(schema: &Value, value: &Value) -> bool {
     )
     .unwrap_or(u64::MAX);
     count < min || max.is_some_and(|limit| count > limit)
+}
+
+/// `branch_accepts` treats an applicator it does not enter as a match,
+/// including one nested under a property or an item. The count has to
+/// go through [`contains_settled`] instead.
+fn contains_count_needs_settled(contains: &Value) -> bool {
+    hidden_applicator(contains) || unevaluable_string_keyword(contains)
+}
+
+/// `oneOf`, `anyOf`, `allOf`, and `if` are invisible to [`branch_accepts`].
+/// A property name is not one of those keywords. Annotation values are not schemas.
+fn hidden_applicator(schema: &Value) -> bool {
+    match schema {
+        Value::Array(items) => items.iter().any(hidden_applicator),
+        Value::Object(map) => map.iter().any(|(key, child)| {
+            if matches!(key.as_str(), "oneOf" | "anyOf" | "allOf" | "if") {
+                return true;
+            }
+            if is_schema_annotation(key) {
+                return false;
+            }
+            if matches!(
+                key.as_str(),
+                "properties" | "patternProperties" | "dependentSchemas" | "dependencies"
+            ) {
+                return child
+                    .as_object()
+                    .is_some_and(|props| props.values().any(hidden_applicator));
+            }
+            hidden_applicator(child)
+        }),
+        _ => false,
+    }
+}
+
+fn is_schema_annotation(key: &str) -> bool {
+    matches!(
+        key,
+        "$defs"
+            | "definitions"
+            | "$id"
+            | "$schema"
+            | "$anchor"
+            | "$dynamicAnchor"
+            | "$comment"
+            | "description"
+            | "title"
+            | "examples"
+            | "example"
+            | "default"
+            | "const"
+            | "enum"
+            | "deprecated"
+    )
 }
 
 fn contain_limits(schema: &Value) -> Option<(u64, Option<u64>)> {
