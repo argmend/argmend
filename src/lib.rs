@@ -3,6 +3,10 @@
 //! The crate does not know about Bline errors, chat requests, or the tool
 //! catalog. Callers pass the raw argument string and, when they have it,
 //! the tool's JSON schema.
+//!
+//! [`repair_args`] and [`normalize`] produce JSON. A successful result is
+//! not a promise that the schema accepts it. The host still validates
+//! before it runs a tool.
 
 mod salvage;
 mod schema;
@@ -262,7 +266,35 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 
 /// Parse `raw`, then apply [`normalize`] when a schema is present.
 ///
+/// `Ok` means this crate produced JSON. It does not mean the schema accepts
+/// that JSON. A value that already fails `required`, `pattern`, `format`,
+/// or an unresolved `$ref` stays in place when nothing was rewritten. The
+/// host still validates before it runs a tool.
+///
+/// A schema that is the JSON boolean `true` or `false` is not applied. A
+/// string is not parsed again when the schema asks for an object or an
+/// array. An unresolved `$ref` does not block a sibling keyword this crate
+/// can check. A checkable sibling, such as `maximum`, still applies.
+///
 /// Blank input is `{}`, `[]`, or null, matching the schema type.
+///
+/// ```
+/// use argmend::{repair_args, RepairRequest};
+/// use serde_json::json;
+///
+/// let schema = json!({
+///     "type": "object",
+///     "properties": {"path": {"type": "string"}},
+///     "required": ["path"]
+/// });
+/// let repaired = repair_args(&RepairRequest {
+///     tool_name: "read",
+///     raw: "{}",
+///     schema: Some(&schema),
+/// })
+/// .expect("missing required is still repairable");
+/// assert_eq!(repaired.value, json!({}));
+/// ```
 pub fn repair_args(request: &RepairRequest<'_>) -> Result<Repaired, RepairError> {
     if is_blank_input(request.raw) {
         let value = blank_value(request.schema).map_err(|err| named(request.tool_name, err))?;
