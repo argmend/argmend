@@ -78,6 +78,7 @@ pub enum RepairError {
 /// Syntax repair only. Empty input and garbage stay [`RepairOutcome::Unfixable`].
 ///
 /// A repeated XML parameter name is [`RepairOutcome::Ambiguous`].
+/// An unescaped quote inside a string is Ambiguous too.
 pub fn repair_json(raw: &str) -> RepairOutcome {
     match salvage_value(raw) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
@@ -127,7 +128,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         }
     }
 
-    let staged = syntax::apply_stages(&body);
+    let staged = syntax::apply_stages(&body)?;
     let parse_error = match serde_json::from_str::<Value>(&staged.text) {
         Ok(value) => {
             prefix.extend(staged.repairs);
@@ -585,6 +586,122 @@ mod tests {
             RepairOutcome::Valid(value) => assert_eq!(value["msg"], r#"{"a":1,"a":2}"#),
             other => panic!("expected Valid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unescaped_quote_inside_a_string_is_ambiguous() {
+        for raw in [
+            r#"{"cmd": "say "hi" now"}"#,
+            r#"{"a": "x", "b": "say "hi"", "c": 1}"#,
+            r#"{"cmd": "say "now: 1}"#,
+            r#"{"a": "x"b: 1}"#,
+            r#"{"a": "x"b : 1}"#,
+            r#"{"cmd": "say "hello world: 1}"#,
+        ] {
+            match repair_json(raw) {
+                RepairOutcome::Ambiguous(reason) => {
+                    assert_eq!(reason, "unescaped quote in a string");
+                }
+                other => panic!("{raw} -> {other:?}"),
+            }
+        }
+        match repair_json(r#"{"cmd": "say \"hi\" now"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["cmd"], "say \"hi\" now"),
+            other => panic!("escaped quote {other:?}"),
+        }
+        match repair_json(r#"{"a": "x" "b": 1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], 1);
+                assert_eq!(value.as_object().expect("object").len(), 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("missing comma {other:?}"),
+        }
+        match repair_json("{a: 1 \"b\" 2}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing colons")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs.iter().any(|item| item.detail.contains("bare keys")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("number then quoted key {other:?}"),
+        }
+        match repair_json("{a: 1, \"b\" 2}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing colons")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs.iter().any(|item| item.detail.contains("bare keys")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("comma then quoted key {other:?}"),
+        }
+        match repair_json(r#"{a: "x" b 1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing colons")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("spaced bare key {other:?}"),
+        }
+        match repair_json(r#"{a: "x" b: 1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("spaced key with colon {other:?}"),
+        }
+        match repair_json("```json\n{\"cmd\": \"say \"hi\" now\"}\n```") {
+            RepairOutcome::Ambiguous(reason) => {
+                assert_eq!(reason, "unescaped quote in a string");
+            }
+            other => panic!("fenced {other:?}"),
+        }
+        let err = repair_args(&RepairRequest {
+            tool_name: "say",
+            raw: r#"{"cmd": "say "hi" now"}"#,
+            schema: None,
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "tool 'say': unescaped quote in a string");
     }
 
     #[test]
