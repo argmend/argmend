@@ -439,6 +439,40 @@ mod tests {
     }
 
     #[test]
+    fn fence_with_a_spaced_tag_unwraps() {
+        for raw in [
+            "``` json\n{\"a\": 1}\n```",
+            "``` json5\n{\"a\": 1}\n```",
+            "``` JSON\n{\"a\": 1}\n```",
+            "```\tjsonc\n{\"a\": 1}\n```",
+            "```json\n{\"a\": 1}\n```",
+            "```\n{\"a\": 1}\n```",
+        ] {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value["a"], 1, "{raw:?}");
+                    assert!(
+                        repairs.iter().any(|item| {
+                            item.kind == RewriteKind::Fence
+                                && item.detail.contains("unwrapped markdown fence")
+                        }),
+                        "{raw:?}: {repairs:?}"
+                    );
+                }
+                other => panic!("{raw:?}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            repair_json("``` json5foo\n{\"a\": 1}\n```"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("``` hello\n{\"a\": 1}\n```"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn fence_then_bare_key() {
         let raw = "```json\n{file: \"a.rs\"}\n```";
         match repair_json(raw) {
@@ -922,6 +956,73 @@ mod tests {
             "allOf": [{"properties": {"file": {"type": "string"}}}]
         });
         expect_conflict(&both, json!({"file": "a.rs"}), "file", "path");
+    }
+
+    #[test]
+    fn pattern_properties_block_an_alias_rename() {
+        let closed = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "patternProperties": {"^file$": {"type": "integer"}}
+        });
+        let err = normalize(&json!({"file": "a.rs"}), &closed).expect_err("pattern owns file");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'file' may be allowed by patternProperties"
+        );
+
+        let unevaluated = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"patternProperties": {"^file$": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"file": "a.rs"}), &unevaluated).expect_err("evaluated pattern");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'file' may be evaluated by patternProperties"
+        );
+
+        let aliased = json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "x-aliases": ["text"]}
+            },
+            "additionalProperties": false,
+            "patternProperties": {"^text$": {"type": "string"}}
+        });
+        let err = normalize(&json!({"text": "hi"}), &aliased).expect_err("alias pattern");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'text' may be allowed by patternProperties"
+        );
+
+        let plain = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"file": "a.rs"}), &plain).expect("plain rename");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
+
+        let alias = json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "x-aliases": ["text"]}
+            },
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"text": "hi"}), &alias).expect("alias rename");
+        assert_eq!(repaired.value, json!({"content": "hi"}));
+
+        let open = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "patternProperties": {"^file$": {"type": "integer"}}
+        });
+        let repaired = normalize(&json!({"file": "a.rs"}), &open).expect("open pattern");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
     }
 
     #[test]
@@ -1692,6 +1793,22 @@ mod tests {
     }
 
     #[test]
+    fn unclosed_single_quote_does_not_finish_the_string() {
+        assert!(matches!(
+            repair_json("{a: 'src/main.rs"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(repair_json("'hello"), RepairOutcome::Unfixable(_)));
+        assert!(matches!(repair_json("'"), RepairOutcome::Unfixable(_)));
+        match repair_json("{a: 'src/main.rs'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "src/main.rs");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn python_literals_become_json_values() {
         match repair_json("{a: True, b: False, c: None, items: [True, None]}") {
             RepairOutcome::Repaired { value, .. } => {
@@ -2056,6 +2173,160 @@ mod tests {
     }
 
     #[test]
+    fn integer_string_above_i64_max_coerces_when_it_fits_u64() {
+        let integer = json!({"type": "integer"});
+        let number = json!({"type": "number"});
+
+        let repaired = normalize(&json!("9223372036854775808"), &integer).expect("above i64");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(repaired.value.as_i64().is_none());
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string 9223372036854775808"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let repaired = normalize(&json!("18446744073709551615"), &integer).expect("u64 max");
+        assert_eq!(repaired.value.as_u64(), Some(18446744073709551615));
+        assert!(repaired.value.as_i64().is_none());
+
+        let kept = json!("18446744073709551616");
+        let repaired = normalize(&kept, &integer).expect("past u64");
+        assert_eq!(repaired.value, kept);
+        assert!(repaired.rewrites.is_empty());
+
+        let repaired = normalize(&json!("+9223372036854775808"), &integer).expect("unary plus");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string +9223372036854775808"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let repaired = normalize(&json!("9223372036854775808.0"), &integer).expect("zero fraction");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string 9223372036854775808.0"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let repaired = normalize(&json!("9223372036854775808"), &number).expect("number");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(repaired.value.as_i64().is_none());
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "number string 9223372036854775808"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let raw = json!("+-5");
+        let repaired = normalize(&raw, &integer).expect("second sign");
+        assert_eq!(repaired.value, raw);
+        assert!(repaired.rewrites.is_empty());
+
+        let repaired = normalize(&json!("01"), &integer).expect("leading zero");
+        assert_eq!(repaired.value, "01");
+        assert!(repaired.rewrites.is_empty());
+
+        let repaired = normalize(&json!("9223372036854775807"), &integer).expect("i64 max");
+        assert_eq!(repaired.value.as_i64(), Some(9223372036854775807));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string 9223372036854775807")
+        );
+
+        let bounded = json!({"type": "integer", "maximum": 10});
+        let err = normalize(&json!("9223372036854775809"), &bounded).expect_err("above maximum");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        assert!(err.to_string().contains("bounds"), "{err}");
+    }
+
+    #[test]
+    fn large_integer_bounds_use_the_full_integer() {
+        fn parsed(text: &str) -> Value {
+            serde_json::from_str(text).expect(text)
+        }
+        fn assert_bounds(value: &str, schema: &str) {
+            let err =
+                normalize(&Value::String(value.to_string()), &parsed(schema)).expect_err(value);
+            assert_eq!(
+                err,
+                RepairError::Ambiguous("coerced value is outside the schema bounds".to_string()),
+                "{value} against {schema}"
+            );
+        }
+        fn assert_excluded(value: &str, schema: &str) {
+            let err =
+                normalize(&Value::String(value.to_string()), &parsed(schema)).expect_err(value);
+            assert_eq!(
+                err,
+                RepairError::Ambiguous("coerced value is excluded by not".to_string()),
+                "{value} against {schema}"
+            );
+        }
+        fn assert_number(value: &str, schema: &str) {
+            let repaired =
+                normalize(&Value::String(value.to_string()), &parsed(schema)).expect(value);
+            assert_eq!(repaired.value, parsed(value), "{value} against {schema}");
+        }
+
+        assert_bounds(
+            "9223372036854775807",
+            r#"{"type":"integer","minimum":9223372036854775808}"#,
+        );
+        assert_bounds(
+            "9007199254740993",
+            r#"{"type":"integer","minimum":9223372036854777856}"#,
+        );
+        assert_bounds(
+            "18446744073709551615",
+            r#"{"type":"integer","minimum":18446744073709551616}"#,
+        );
+        assert_number(
+            "9223372036854775807",
+            r#"{"type":"integer","exclusiveMaximum":9223372036854775808}"#,
+        );
+        assert_excluded(
+            "5",
+            r#"{"type":"integer","not":{"maximum":9223372036854775808}}"#,
+        );
+        assert_excluded(
+            "9223372036854775808",
+            r#"{"type":"integer","not":{"minimum":9223372036854775808}}"#,
+        );
+
+        assert_number(
+            "9223372036854775808",
+            r#"{"type":"integer","minimum":9223372036854775808}"#,
+        );
+        assert_bounds(
+            "9223372036854775808",
+            r#"{"type":"integer","minimum":9223372036854777856}"#,
+        );
+        assert_number(
+            "18446744073709551615",
+            r#"{"type":"integer","maximum":18446744073709551616}"#,
+        );
+        assert_number("5", r#"{"type":"integer","maximum":10}"#);
+        assert_bounds("11", r#"{"type":"integer","maximum":10}"#);
+    }
+
+    #[test]
     fn dependent_schema_applies_when_the_property_is_present() {
         let schema = json!({
             "dependentSchemas": {
@@ -2406,7 +2677,10 @@ mod tests {
             &schema,
         )
         .expect_err("two junk");
-        assert!(err.to_string().contains("2 unknown"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "unknown keys 'extra' and 'note' and unevaluatedProperties is false"
+        );
 
         let patterned = json!({
             "type": "object",
@@ -2910,6 +3184,97 @@ mod tests {
         });
         let err = normalize(&json!(["1"]), &branches).expect_err("allof");
         assert!(err.to_string().contains("misses contains"), "{err}");
+    }
+
+    #[test]
+    fn max_contains_is_not_reported_as_a_miss() {
+        let miss_const = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": "1"}
+        });
+        let err = normalize(&json!(["1"]), &miss_const).expect_err("const string");
+        assert!(err.to_string().contains("misses contains"), "{err}");
+
+        let miss_max = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"maximum": 3}
+        });
+        let err = normalize(&json!(["9"]), &miss_max).expect_err("above maximum");
+        assert!(err.to_string().contains("misses contains"), "{err}");
+
+        let capped = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": 1},
+            "maxContains": 1
+        });
+        let err = normalize(&json!(["1", "1"]), &capped).expect_err("two consts");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let bounded = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"anyOf": [{"maximum": 3}, {"minimum": 10}]},
+            "maxContains": 1
+        });
+        let err = normalize(&json!(["2", "1"]), &bounded).expect_err("two bounds");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let patterned = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"anyOf": [{"maximum": 3}, {"pattern": "^a"}]},
+            "maxContains": 1
+        });
+        let err = normalize(&json!(["2", "1", "9"]), &patterned).expect_err("pattern overflow");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let objects = json!({
+            "type": "array",
+            "items": {"type": "object", "properties": {"n": {"type": "integer"}}},
+            "contains": {"properties": {"n": {"anyOf": [{"maximum": 3}]}}},
+            "maxContains": 1
+        });
+        let err = normalize(&json!([{"n": "1"}, {"n": "2"}]), &objects).expect_err("two objects");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let nested = json!({
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "integer"}},
+            "contains": {"items": {"anyOf": [{"maximum": 3}]}},
+            "maxContains": 0
+        });
+        let err = normalize(&json!([["2"]]), &nested).expect_err("max zero");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+    }
+
+    #[test]
+    fn closed_object_names_the_keys_it_refused() {
+        let extras = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let err = normalize(&json!({"path": "a.rs", "extra": 1, "other": 2}), &extras)
+            .expect_err("two unknown");
+        assert_eq!(
+            err.to_string(),
+            "unknown keys 'extra' and 'other' and additionalProperties is false"
+        );
+
+        let required = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        });
+        let err = normalize(&json!({"extra": 1}), &required).expect_err("missing path");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'extra' and required key 'path' is missing"
+        );
     }
 
     #[test]
@@ -4464,7 +4829,7 @@ mod tests {
             "maxContains": 1
         });
         let err = normalize(&json!(["2", "1", "9"]), &over).expect_err("over max");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
         let kept = normalize(&json!(["2", "9"]), &over).expect("maybe over max");
         assert_eq!(kept.value[0], 2);
         assert_eq!(kept.value[1], 9);
@@ -4482,7 +4847,7 @@ mod tests {
         assert_eq!(repaired.value[0], 2);
         assert_eq!(repaired.value[1], 9);
         let err = normalize(&json!(["2", "1"]), &bounded).expect_err("two real hits");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
 
         let wrapped = json!({
             "type": "array",
@@ -4531,7 +4896,7 @@ mod tests {
         assert_eq!(repaired.value[0]["n"], 9);
         assert_eq!(repaired.value[1]["n"], 1);
         let err = normalize(&json!([{"n": "1"}, {"n": "2"}]), &root).expect_err("two real hits");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
 
         let items = json!({
             "type": "array",
@@ -4543,7 +4908,7 @@ mod tests {
         let repaired = normalize(&json!([["9"]]), &items).expect("zero hits is inside max 0");
         assert_eq!(repaired.value[0][0], 9);
         let err = normalize(&json!([["2"]]), &items).expect_err("one hit over max 0");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
     }
 
     #[test]

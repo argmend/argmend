@@ -81,10 +81,8 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value repeats an array item".into(),
             ));
         }
-        if violates_contains(schema, &next) {
-            return Err(RepairError::Ambiguous(
-                "coerced value misses contains".into(),
-            ));
+        if let Some(reason) = contains_refusal(schema, &next) {
+            return Err(RepairError::Ambiguous(reason.into()));
         }
         if outside_const_or_enum(schema, &next) {
             return Err(RepairError::Ambiguous(
@@ -453,9 +451,8 @@ fn violates_not(schema: &Value, value: &Value) -> bool {
     known_constraint(not_schema) && branch_accepts(not_schema, value)
 }
 
-/// Inclusive `minimum` / `maximum`, numeric exclusive bounds, and the
-/// draft-04 boolean form of `exclusiveMinimum` / `exclusiveMaximum`.
-/// A bound that is not an exact finite number is ignored.
+/// `uniqueItems: true` refuses an array that repeats an item.
+/// A missing flag, or any flag other than `true`, is not a failure.
 fn violates_unique(schema: &Value, value: &Value) -> bool {
     if schema.get("uniqueItems") != Some(&Value::Bool(true)) {
         return false;
@@ -581,11 +578,18 @@ fn outer_property_rejected(
 }
 
 fn violates_bounds(schema: &Value, value: &Value) -> bool {
-    // An i64 past 2^53 is not an exact f64, so the float path would skip
-    // the bound. Compare it with each bound as an integer when the bound's
-    // integer part is exact, including a fraction such as 10.5.
+    // An i64 past 2^53, or a u64 past i64::MAX, is not an exact f64, so the
+    // float path would skip the bound. Compare it with each bound as an
+    // integer when the bound's integer part is exact, including a fraction
+    // such as 10.5.
     if let Some(int) = value.as_i64()
         && let Some(outside) = i64_against_schema_bounds(schema, int)
+    {
+        return outside;
+    }
+    if value.as_i64().is_none()
+        && let Some(int) = value.as_u64()
+        && let Some(outside) = u64_against_schema_bounds(schema, int)
     {
         return outside;
     }
@@ -603,7 +607,11 @@ fn i64_against_schema_bounds(schema: &Value, int: i64) -> Option<bool> {
         if bound.is_boolean() {
             continue;
         }
-        if schema_i64_limit(schema, key).is_none() && comparable_f64_bound(bound).is_none() {
+        if schema_i64_limit(schema, key).is_none()
+            && bound.as_u64().is_none()
+            && !finite_above_every_u64(bound)
+            && comparable_f64_bound(bound).is_none()
+        {
             return None;
         }
     }
@@ -642,6 +650,10 @@ fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) 
     }
     let order = if let Some(limit) = schema_i64_limit(schema, key) {
         int.cmp(&limit)
+    } else if let Some(limit) = bound.as_u64() {
+        cmp_i64_u64(int, limit)
+    } else if finite_above_every_u64(bound) {
+        Ordering::Less
     } else if let Some(limit) = comparable_f64_bound(bound) {
         cmp_i64_f64(int, limit)
     } else {
@@ -660,8 +672,105 @@ fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) 
     }
 }
 
+fn cmp_i64_u64(int: i64, limit: u64) -> Ordering {
+    u64::try_from(int).map_or(Ordering::Less, |int| int.cmp(&limit))
+}
+
+fn finite_above_every_u64(bound: &Value) -> bool {
+    bound
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number >= u64::MAX as f64)
+}
+
 fn cmp_i64_f64(int: i64, limit: f64) -> Ordering {
     let trunc = limit.trunc() as i64;
+    match int.cmp(&trunc) {
+        Ordering::Equal if limit == limit.trunc() => Ordering::Equal,
+        Ordering::Equal if limit > trunc as f64 => Ordering::Less,
+        Ordering::Equal => Ordering::Greater,
+        other => other,
+    }
+}
+
+fn u64_against_schema_bounds(schema: &Value, int: u64) -> Option<bool> {
+    for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+        let Some(bound) = schema.get(key) else {
+            continue;
+        };
+        if bound.is_boolean() {
+            continue;
+        }
+        if bound.as_i64().is_none()
+            && bound.as_u64().is_none()
+            && !finite_above_every_u64(bound)
+            && comparable_f64_bound(bound).is_none()
+        {
+            return None;
+        }
+    }
+    Some(u64_outside_bounds(schema, int))
+}
+
+fn u64_outside_bounds(schema: &Value, int: u64) -> bool {
+    if u64_bound_fails(schema, int, "exclusiveMinimum", true, true) {
+        return true;
+    }
+    let minimum_exclusive = matches!(schema.get("exclusiveMinimum"), Some(Value::Bool(true)));
+    if u64_bound_fails(schema, int, "minimum", minimum_exclusive, true) {
+        return true;
+    }
+    if u64_bound_fails(schema, int, "exclusiveMaximum", true, false) {
+        return true;
+    }
+    let maximum_exclusive = matches!(schema.get("exclusiveMaximum"), Some(Value::Bool(true)));
+    u64_bound_fails(schema, int, "maximum", maximum_exclusive, false)
+}
+
+fn u64_bound_fails(schema: &Value, int: u64, key: &str, exclusive: bool, low: bool) -> bool {
+    let Some(bound) = schema.get(key) else {
+        return false;
+    };
+    if bound.is_boolean() {
+        return false;
+    }
+    let Some(order) = cmp_u64_bound(int, bound) else {
+        return false;
+    };
+    if low {
+        if exclusive {
+            order.is_le()
+        } else {
+            order.is_lt()
+        }
+    } else if exclusive {
+        order.is_ge()
+    } else {
+        order.is_gt()
+    }
+}
+
+fn cmp_u64_bound(int: u64, bound: &Value) -> Option<Ordering> {
+    if let Some(limit) = bound.as_i64() {
+        return Some(match u64::try_from(limit) {
+            Ok(limit) => int.cmp(&limit),
+            Err(_) => Ordering::Greater,
+        });
+    }
+    if let Some(limit) = bound.as_u64() {
+        return Some(int.cmp(&limit));
+    }
+    if finite_above_every_u64(bound) {
+        return Some(Ordering::Less);
+    }
+    let limit = comparable_f64_bound(bound)?;
+    Some(cmp_u64_f64(int, limit))
+}
+
+fn cmp_u64_f64(int: u64, limit: f64) -> Ordering {
+    if limit < 0.0 {
+        return Ordering::Greater;
+    }
+    let trunc = limit.trunc() as u64;
     match int.cmp(&trunc) {
         Ordering::Equal if limit == limit.trunc() => Ordering::Equal,
         Ordering::Equal if limit > trunc as f64 => Ordering::Less,
@@ -676,8 +785,13 @@ fn schema_i64_limit(schema: &Value, key: &str) -> Option<i64> {
         return Some(int);
     }
     let number = value.as_f64()?;
-    if number.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(&number) {
-        Some(number as i64)
+    // `i64::MAX as f64` is 2^63. Casting that f64 to i64 saturates at i64::MAX.
+    if !number.is_finite() || number >= i64::MAX as f64 {
+        return None;
+    }
+    let int = number as i64;
+    if int as f64 == number {
+        Some(int)
     } else {
         None
     }
@@ -773,7 +887,10 @@ fn checkable_bound(schema: &Value) -> bool {
 }
 
 fn checkable_number(bound: &Value) -> bool {
-    bound.as_i64().is_some() || comparable_f64_bound(bound).is_some()
+    bound.as_i64().is_some()
+        || bound.as_u64().is_some()
+        || comparable_f64_bound(bound).is_some()
+        || finite_above_every_u64(bound)
 }
 
 fn checkable_multiple(schema: &Value) -> bool {
@@ -1055,7 +1172,7 @@ fn contains_settled(schema: &Value, value: &Value) -> Settled {
         }
     }
     if max.is_some_and(|limit| yes > limit) {
-        return Settled::No("coerced value misses contains".to_string());
+        return Settled::No("coerced value is outside maxContains".to_string());
     }
     let within_max = match max {
         None => true,
@@ -1288,8 +1405,8 @@ fn constraint_failure(schema: &Value, value: &Value) -> Option<&'static str> {
     if violates_unique(schema, value) {
         return Some("coerced value repeats an array item");
     }
-    if violates_contains(schema, value) {
-        return Some("coerced value misses contains");
+    if let Some(reason) = contains_refusal(schema, value) {
+        return Some(reason);
     }
     if violates_size(schema, value) {
         return Some("coerced value is outside the schema size");
@@ -1571,19 +1688,18 @@ fn integer_limit(schema: &Value, key: &str) -> Option<u64> {
 /// `contains` fails when too few or too many items match.
 /// `minContains` defaults to 1. A limit that is not an integer is ignored.
 fn violates_contains(schema: &Value, value: &Value) -> bool {
-    let Some(contains) = schema.get("contains").filter(|schema| schema.is_object()) else {
-        return false;
-    };
-    let Some(items) = value.as_array() else {
-        return false;
-    };
-    let Some((min, max)) = contain_limits(schema) else {
-        return false;
-    };
-    // An applicator this walker cannot enter is not a hit.
-    // [`contains_settled`] counts those items.
+    contains_refusal(schema, value).is_some()
+}
+
+/// Too few matches miss `contains`. A count above `maxContains` does not.
+/// An applicator this walker cannot enter is not a hit.
+/// [`contains_settled`] counts those items.
+fn contains_refusal(schema: &Value, value: &Value) -> Option<&'static str> {
+    let contains = schema.get("contains").filter(|schema| schema.is_object())?;
+    let items = value.as_array()?;
+    let (min, max) = contain_limits(schema)?;
     if contains_count_needs_settled(contains) {
-        return false;
+        return None;
     }
     let count = u64::try_from(
         items
@@ -1592,7 +1708,13 @@ fn violates_contains(schema: &Value, value: &Value) -> bool {
             .count(),
     )
     .unwrap_or(u64::MAX);
-    count < min || max.is_some_and(|limit| count > limit)
+    if max.is_some_and(|limit| count > limit) {
+        return Some("coerced value is outside maxContains");
+    }
+    if count < min {
+        return Some("coerced value misses contains");
+    }
+    None
 }
 
 /// `branch_accepts` treats an applicator it does not enter as a match,
@@ -1846,6 +1968,16 @@ fn normalize_object(
         }
         match alias_target(key, props)? {
             Some(target) => {
+                if (has_pattern_properties(schema) || coverage.open_pattern)
+                    && (denies_unknown(schema) || additional_properties_schema(schema).is_some())
+                {
+                    let reason = if has_pattern_properties(schema) {
+                        format!("unknown key '{key}' may be allowed by patternProperties")
+                    } else {
+                        format!("unknown key '{key}' may be evaluated by patternProperties")
+                    };
+                    return Err(RepairError::Ambiguous(reason));
+                }
                 if PATH_KEYS.contains(&key.as_str())
                     && PATH_KEYS.contains(&target)
                     && applicator_names_property(schema, key)
@@ -1907,10 +2039,7 @@ fn normalize_object(
         refuse_covered_unknown(schema, &unknown, &coverage)?;
         if unknown.len() > 1 {
             let reason = unknown_denial(schema).unwrap_or("unknown keys are forbidden");
-            return Err(RepairError::Ambiguous(format!(
-                "{} unknown keys and {reason}",
-                unknown.len()
-            )));
+            return Err(RepairError::Ambiguous(named_unknown_keys(&unknown, reason)));
         }
         if let Some((key, _)) = unknown.pop() {
             let ready = required_present(schema, &out);
@@ -1922,6 +2051,10 @@ fn normalize_object(
             } else if ready {
                 return Err(RepairError::Ambiguous(format!(
                     "refusing to drop the only key '{key}'"
+                )));
+            } else if let Some(missing) = first_missing_required(schema, &out) {
+                return Err(RepairError::Ambiguous(format!(
+                    "unknown key '{key}' and required key '{missing}' is missing"
                 )));
             } else {
                 return Err(RepairError::Ambiguous(format!(
@@ -1976,7 +2109,8 @@ fn normalized_alias_side(
 /// property that is also a path key (`path`, `file`, `file_path`, `filepath`,
 /// `path_name`). [`normalize_object`] refuses that rename when an applicator
 /// `properties` map lists the incoming key. Parent `properties` are not that
-/// conflict.
+/// conflict. A nonempty `patternProperties` map blocks the rename when this
+/// object would already refuse an unknown key for that reason.
 fn alias_target<'a>(
     key: &str,
     props: &'a Map<String, Value>,
@@ -2373,18 +2507,34 @@ fn required_holds(schema: &Value, value: &Value) -> bool {
 }
 
 fn required_present(schema: &Value, out: &Map<String, Value>) -> bool {
+    first_missing_required(schema, out).is_none()
+}
+
+fn first_missing_required<'a>(schema: &'a Value, out: &Map<String, Value>) -> Option<&'a str> {
     let schema = if schema.get("properties").is_none() {
         schema.get("parameters").unwrap_or(schema)
     } else {
         schema
     };
-    let Some(required) = schema.get("required").and_then(Value::as_array) else {
-        return true;
-    };
+    let required = schema.get("required").and_then(Value::as_array)?;
     required
         .iter()
         .filter_map(Value::as_str)
-        .all(|name| out.contains_key(name))
+        .find(|name| !out.contains_key(*name))
+}
+
+/// Names every unknown key, in map order. Two keys read as a pair.
+fn named_unknown_keys(unknown: &[(String, Value)], reason: &str) -> String {
+    let names: Vec<String> = unknown.iter().map(|(key, _)| format!("'{key}'")).collect();
+    let listed = match names.as_slice() {
+        [first, second] => format!("unknown keys {first} and {second}"),
+        [first, middle @ .., last] => {
+            let rest = middle.join(", ");
+            format!("unknown keys {first}, {rest}, and {last}")
+        }
+        _ => format!("{} unknown keys", names.len()),
+    };
+    format!("{listed} and {reason}")
 }
 
 /// An array value uses `items`, `prefixItems`, or `unevaluatedItems` even
@@ -2819,20 +2969,27 @@ fn record_constrained(text: &str, matched: &Value, schema: &Value, rewrites: &mu
 }
 
 /// One leading `+` is unary plus. A second sign (`+-5`) is not a number
-/// token. `const` and `enum` use this parser and follow the same rule.
+/// token. An integer that fits in `u64` but not `i64` is still that integer.
+/// `const` and `enum` use this parser and follow the same rule.
 fn integer_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = without_unary_plus(&text);
     if text.is_empty() || !is_integer_token(text) || has_leading_zero(text) {
         return None;
     }
-    let parsed = text.parse::<i64>().ok()?;
-    Some(serde_json::Number::from(parsed))
+    if let Ok(parsed) = text.parse::<i64>() {
+        return Some(serde_json::Number::from(parsed));
+    }
+    if text.starts_with('-') {
+        return None;
+    }
+    text.parse::<u64>().ok().map(serde_json::Number::from)
 }
 
 /// `"3.0"`, `"-2.000"`, and `"1."` are integers. `"3.10"` and `"03.0"` are not.
 /// One leading `+` is unary plus. A second sign (`+-2.0`) is not a number
-/// token. `const` and `enum` use this parser and follow the same rule.
+/// token. An integer that fits in `u64` but not `i64` is still that integer.
+/// `const` and `enum` use this parser and follow the same rule.
 fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = without_unary_plus(&text);
@@ -2853,12 +3010,18 @@ fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
         digits.push('-');
     }
     digits.push_str(whole);
-    let parsed = digits.parse::<i64>().ok()?;
-    Some(serde_json::Number::from(parsed))
+    if let Ok(parsed) = digits.parse::<i64>() {
+        return Some(serde_json::Number::from(parsed));
+    }
+    if negative {
+        return None;
+    }
+    digits.parse::<u64>().ok().map(serde_json::Number::from)
 }
 
 /// One leading `+` is unary plus. A second sign (`+-1.5`, `+-1e2`) is not a
-/// number token. `const` and `enum` use this parser and follow the same rule.
+/// number token. An integer that fits in `u64` but not `i64` is still that
+/// integer. `const` and `enum` use this parser and follow the same rule.
 fn number_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = without_unary_plus(&text);

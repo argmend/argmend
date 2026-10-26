@@ -44,18 +44,20 @@ fn tail_is_comment(tail: &str) -> bool {
 
 /// Drop a fence info string such as `json`, `jsonc`, or `json5` when it is a tag.
 ///
-/// The tag may contain a digit. An unknown word that only starts with a
-/// known tag, such as `json5foo`, stays in the body.
+/// The tag may contain a digit. A space or tab before the tag is ignored,
+/// so `json` with a leading space unwraps, and `json5foo` with a leading
+/// space stays in the body.
 fn strip_fence_info(rest: &str) -> &str {
-    let end = rest
+    let skipped = rest.trim_start_matches([' ', '\t']);
+    let end = skipped
         .char_indices()
         .find(|(_, ch)| !ch.is_ascii_alphanumeric())
         .map(|(idx, _)| idx)
-        .unwrap_or(rest.len());
+        .unwrap_or(skipped.len());
     if end == 0 {
         return rest;
     }
-    let tag = &rest[..end];
+    let tag = &skipped[..end];
     let allowed = matches!(
         tag,
         "json" | "JSON" | "jsonc" | "JSONC" | "json5" | "JSON5" | "javascript" | "js" | "JS"
@@ -63,7 +65,7 @@ fn strip_fence_info(rest: &str) -> &str {
     if !allowed {
         return rest;
     }
-    let after = &rest[end..];
+    let after = &skipped[end..];
     if after.starts_with(['{', '[', ' ', '\t', '\n', '\r']) || after.is_empty() {
         after
     } else {
