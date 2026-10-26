@@ -6,6 +6,7 @@
 //! keywords this crate leaves unused.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
@@ -24,6 +25,11 @@ const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name
 /// the schema type is an object or an array. `$ref` and `$dynamicRef` are
 /// not resolved. They do not veto a sibling `type`, and they do not hide a
 /// sibling bound such as `maximum`.
+///
+/// `unevaluatedProperties: false` keeps a property that `allOf`, `anyOf`,
+/// `oneOf`, `if` / `then` / `else`, or a dependent schema evaluated.
+/// `additionalProperties: false` does not look inside those branches. A key
+/// one of them names is ambiguous instead of dropped.
 pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError> {
     let (next, rewrites) = normalize_child(value, schema)?;
     Ok(Repaired {
@@ -1819,6 +1825,12 @@ fn normalize_object(
     let mut out = Map::new();
     let mut rewrites = Vec::new();
     let mut unknown = Vec::new();
+    let coverage = if denies_unknown(schema) {
+        applicator_coverage(schema, &Value::Object(obj.clone()))?
+    } else {
+        ApplicatorCoverage::default()
+    };
+    let keep_evaluated = unevaluated_properties_closed(schema);
 
     for (key, val) in obj {
         if let Some(prop_schema) = props.get(key) {
@@ -1866,6 +1878,9 @@ fn normalize_object(
                 ));
                 out.insert(target.to_string(), next);
             }
+            None if keep_evaluated && coverage.evaluated.contains(key) => {
+                out.insert(key.clone(), val.clone());
+            }
             None => unknown.push((key.clone(), val.clone())),
         }
     }
@@ -1877,6 +1892,7 @@ fn normalize_object(
                 "unknown key '{key}' may be allowed by patternProperties"
             )));
         }
+        refuse_covered_unknown(schema, &unknown, &coverage)?;
         if unknown.len() > 1 {
             let reason = unknown_denial(schema).unwrap_or("unknown keys are forbidden");
             return Err(RepairError::Ambiguous(format!(
@@ -2008,14 +2024,11 @@ fn denies_unknown(schema: &Value) -> bool {
 }
 
 /// `additionalProperties: false`, or `unevaluatedProperties: false` when
-/// `additionalProperties` is absent. A subschema that lists the key is not
-/// visible here, so a pattern still refuses the drop.
+/// `additionalProperties` is absent. Applicator keys are not visible here.
+/// [`normalize_object`] keeps a key `unevaluatedProperties` evaluated and
+/// refuses to drop a key `additionalProperties` would only reject.
 fn unknown_denial(schema: &Value) -> Option<&'static str> {
-    let schema = if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
-        schema
-    };
+    let schema = schema_view(schema);
     if matches!(schema.get("additionalProperties"), Some(Value::Bool(false))) {
         return Some("additionalProperties is false");
     }
@@ -2025,6 +2038,228 @@ fn unknown_denial(schema: &Value) -> Option<&'static str> {
         return Some("unevaluatedProperties is false");
     }
     None
+}
+
+fn schema_view(schema: &Value) -> &Value {
+    if schema.get("properties").is_none() {
+        schema.get("parameters").unwrap_or(schema)
+    } else {
+        schema
+    }
+}
+
+fn unevaluated_properties_closed(schema: &Value) -> bool {
+    let schema = schema_view(schema);
+    schema.get("additionalProperties").is_none()
+        && schema.get("unevaluatedProperties") == Some(&Value::Bool(false))
+}
+
+fn additional_properties_closed(schema: &Value) -> bool {
+    schema_view(schema).get("additionalProperties") == Some(&Value::Bool(false))
+}
+
+#[derive(Default)]
+struct ApplicatorCoverage {
+    /// Keys an applied branch listed under `properties`.
+    evaluated: BTreeSet<String>,
+    /// Keys an `allOf` branch or an active dependent schema lists, including
+    /// a branch that rejects the instance. Dropping one hides that judgment.
+    guarded: BTreeSet<String>,
+    /// Keys any applicator `properties` map lists. `additionalProperties`
+    /// does not treat those as known.
+    mentioned: BTreeSet<String>,
+    /// An applied branch has `patternProperties`. The pattern is not matched
+    /// here, so a remaining key may already have been evaluated.
+    open_pattern: bool,
+}
+
+fn applicator_coverage(
+    schema: &Value,
+    instance: &Value,
+) -> Result<ApplicatorCoverage, RepairError> {
+    let mut coverage = ApplicatorCoverage::default();
+    collect_applicators(schema_view(schema), instance, &mut coverage)?;
+    Ok(coverage)
+}
+
+fn collect_applicators(
+    schema: &Value,
+    instance: &Value,
+    coverage: &mut ApplicatorCoverage,
+) -> Result<(), RepairError> {
+    let Some(map) = schema.as_object() else {
+        return Ok(());
+    };
+    if let Some(branches) = map.get("allOf").and_then(Value::as_array) {
+        for branch in branches {
+            guard_allof_properties(branch, coverage);
+            mention_applicator(branch, &mut coverage.mentioned);
+            match branch_result(branch, instance) {
+                Ok(true) => evaluate_branch(branch, instance, coverage)?,
+                Ok(false) => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
+    if let Some(branches) = map.get("anyOf").and_then(Value::as_array) {
+        for branch in branches {
+            mention_applicator(branch, &mut coverage.mentioned);
+            if branch_accepted(branch, instance) {
+                evaluate_branch(branch, instance, coverage)?;
+            }
+        }
+    }
+    if let Some(branches) = map.get("oneOf").and_then(Value::as_array) {
+        let mut matched = Vec::new();
+        for branch in branches {
+            mention_applicator(branch, &mut coverage.mentioned);
+            if branch_accepted(branch, instance) {
+                matched.push(branch);
+            }
+        }
+        if matched.len() == 1 {
+            evaluate_branch(matched[0], instance, coverage)?;
+        }
+    }
+    if let Some(if_schema) = map.get("if") {
+        mention_applicator(if_schema, &mut coverage.mentioned);
+        if let Some(then_schema) = map.get("then") {
+            mention_applicator(then_schema, &mut coverage.mentioned);
+        }
+        if let Some(else_schema) = map.get("else") {
+            mention_applicator(else_schema, &mut coverage.mentioned);
+        }
+        if branch_accepted(if_schema, instance) {
+            // A successful `if` evaluates its own properties, not only `then`.
+            evaluate_branch(if_schema, instance, coverage)?;
+            if let Some(then_schema) = map.get("then")
+                && branch_accepted(then_schema, instance)
+            {
+                evaluate_branch(then_schema, instance, coverage)?;
+            }
+        } else if !unchecked_string_keyword(if_schema)
+            && let Some(else_schema) = map.get("else")
+            && branch_accepted(else_schema, instance)
+        {
+            evaluate_branch(else_schema, instance, coverage)?;
+        }
+    }
+    for (trigger, sub) in dependent_object_schemas(schema) {
+        let present = instance
+            .as_object()
+            .is_some_and(|obj| obj.contains_key(trigger));
+        if !present {
+            continue;
+        }
+        guard_allof_properties(sub, coverage);
+        mention_applicator(sub, &mut coverage.mentioned);
+        match branch_result(sub, instance) {
+            Ok(true) => evaluate_branch(sub, instance, coverage)?,
+            Ok(false) => {
+                if has_pattern_properties(sub) {
+                    coverage.open_pattern = true;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn evaluate_branch(
+    schema: &Value,
+    instance: &Value,
+    coverage: &mut ApplicatorCoverage,
+) -> Result<(), RepairError> {
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        coverage.evaluated.extend(props.keys().cloned());
+    }
+    if has_pattern_properties(schema) {
+        coverage.open_pattern = true;
+    }
+    collect_applicators(schema, instance, coverage)
+}
+
+fn guard_allof_properties(schema: &Value, coverage: &mut ApplicatorCoverage) {
+    if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+        for key in props.keys() {
+            coverage.guarded.insert(key.clone());
+            coverage.mentioned.insert(key.clone());
+        }
+    }
+    if let Some(branches) = schema.get("allOf").and_then(Value::as_array) {
+        for branch in branches {
+            guard_allof_properties(branch, coverage);
+        }
+    }
+}
+
+fn mention_applicator(schema: &Value, mentioned: &mut BTreeSet<String>) {
+    let Some(map) = schema.as_object() else {
+        return;
+    };
+    if let Some(props) = map.get("properties").and_then(Value::as_object) {
+        mentioned.extend(props.keys().cloned());
+    }
+    for key in ["allOf", "anyOf", "oneOf", "if", "then", "else"] {
+        match map.get(key) {
+            Some(Value::Array(branches)) => {
+                for branch in branches {
+                    mention_applicator(branch, mentioned);
+                }
+            }
+            Some(child) => mention_applicator(child, mentioned),
+            None => {}
+        }
+    }
+    for (_, sub) in dependent_object_schemas(schema) {
+        mention_applicator(sub, mentioned);
+    }
+}
+
+/// Whether this branch accepts `instance` after its own coercion.
+/// The caller's object is left as it is. Callers decide which errors count.
+fn branch_result(branch: &Value, instance: &Value) -> Result<bool, RepairError> {
+    match normalize_child(instance, branch) {
+        Ok((next, _)) => Ok(branch_accepts(branch, &next)),
+        Err(err) => Err(err),
+    }
+}
+
+fn branch_accepted(branch: &Value, instance: &Value) -> bool {
+    matches!(branch_result(branch, instance), Ok(true))
+}
+
+fn refuse_covered_unknown(
+    schema: &Value,
+    unknown: &[(String, Value)],
+    coverage: &ApplicatorCoverage,
+) -> Result<(), RepairError> {
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let additional = additional_properties_closed(schema);
+    let unevaluated = unevaluated_properties_closed(schema);
+    if let Some((key, _)) = unknown.iter().find(|(key, _)| {
+        (additional && coverage.mentioned.contains(key))
+            || (unevaluated && coverage.guarded.contains(key) && !coverage.evaluated.contains(key))
+    }) {
+        if additional && coverage.mentioned.contains(key) {
+            return Err(RepairError::Ambiguous(format!(
+                "'{key}' is named by a schema branch and additionalProperties is false"
+            )));
+        }
+        return Err(RepairError::Ambiguous(format!(
+            "'{key}' is named by a schema branch that does not accept it"
+        )));
+    }
+    if coverage.open_pattern && (additional || unevaluated) {
+        let key = &unknown[0].0;
+        return Err(RepairError::Ambiguous(format!(
+            "unknown key '{key}' may be evaluated by patternProperties"
+        )));
+    }
+    Ok(())
 }
 
 fn required_holds(schema: &Value, value: &Value) -> bool {

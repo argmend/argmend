@@ -1872,6 +1872,318 @@ mod tests {
     }
 
     #[test]
+    fn applicator_field_survives_unevaluated_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"properties": {"line": {"type": "integer"}}}]
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "probe",
+            raw: r#"{"path":"a.rs","line":"3"}"#,
+            schema: Some(&schema),
+        })
+        .expect("repair");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string 3")
+        );
+        assert!(
+            !repaired
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::DroppedUnknown)
+        );
+
+        let repaired = normalize(&json!({"path": "a.rs", "line": 3}), &schema).expect("already");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+        assert!(
+            !repaired
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::DroppedUnknown)
+        );
+
+        let nested = json!({
+            "type": "object",
+            "properties": {
+                "args": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "unevaluatedProperties": false,
+                    "allOf": [{"properties": {"line": {"type": "integer"}}}]
+                }
+            }
+        });
+        let repaired =
+            normalize(&json!({"args": {"path": "a.rs", "line": "3"}}), &nested).expect("nested");
+        assert_eq!(repaired.value, json!({"args": {"path": "a.rs", "line": 3}}));
+
+        let both = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [
+                {"properties": {"line": {"type": "integer"}}},
+                {"properties": {"col": {"type": "integer"}}}
+            ]
+        });
+        let repaired =
+            normalize(&json!({"path": "a.rs", "line": "3", "col": "4"}), &both).expect("both");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3, "col": 4}));
+
+        let any = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "anyOf": [
+                {"properties": {"line": {"type": "integer"}}, "required": ["line"]},
+                {"properties": {"col": {"type": "integer"}}, "required": ["col"]}
+            ]
+        });
+        let repaired = normalize(&json!({"path": "a.rs", "line": "3"}), &any).expect("anyOf");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+
+        let one = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "oneOf": [
+                {"properties": {"line": {"type": "integer"}}, "required": ["line"]},
+                {"properties": {"col": {"type": "integer"}}, "required": ["col"]}
+            ]
+        });
+        let repaired = normalize(&json!({"path": "a.rs", "line": "3"}), &one).expect("oneOf");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+
+        let conditional = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "if": {"properties": {"path": {"const": "a.rs"}}},
+            "then": {"properties": {"line": {"type": "integer"}}},
+            "else": {"properties": {"col": {"type": "integer"}}}
+        });
+        let repaired =
+            normalize(&json!({"path": "a.rs", "line": "3"}), &conditional).expect("then");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+        let on_if = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "if": {"properties": {"line": {"type": "integer"}}},
+            "then": {}
+        });
+        let repaired = normalize(&json!({"path": "a.rs", "line": "3"}), &on_if).expect("if");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+        let repaired = normalize(&json!({"path": "b.rs", "col": "4"}), &conditional).expect("else");
+        assert_eq!(repaired.value, json!({"path": "b.rs", "col": 4}));
+        // `then` did not apply, so `line` was not evaluated.
+        let repaired =
+            normalize(&json!({"path": "b.rs", "line": "3"}), &conditional).expect("unevaluated");
+        assert_eq!(repaired.value, json!({"path": "b.rs"}));
+
+        let aliased = json!({
+            "type": "object",
+            "properties": {"mode": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{
+                "properties": {"path": {"type": "string", "x-aliases": ["file"]}}
+            }]
+        });
+        let repaired = normalize(&json!({"mode": "r", "file": "a.rs"}), &aliased).expect("alias");
+        assert_eq!(repaired.value, json!({"mode": "r", "path": "a.rs"}));
+
+        let alias_only = json!({
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{
+                "properties": {"path": {"x-aliases": ["file"]}}
+            }]
+        });
+        let repaired = normalize(&json!({"file": "a.rs"}), &alias_only).expect("alias only");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
+
+        let repaired =
+            normalize(&json!({"path": "a.rs", "line": "3", "note": 1}), &schema).expect("junk");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail.contains("dropped unknown key note"))
+        );
+
+        let err = normalize(
+            &json!({"path": "a.rs", "line": "3", "note": 1, "extra": 2}),
+            &schema,
+        )
+        .expect_err("two junk");
+        assert!(err.to_string().contains("2 unknown"), "{err}");
+
+        let patterned = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{
+                "properties": {"line": {"type": "integer"}},
+                "patternProperties": {"^x-": {"type": "string"}}
+            }]
+        });
+        let repaired = normalize(&json!({"path": "a.rs", "line": "3"}), &patterned).expect("named");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+        let err =
+            normalize(&json!({"path": "a.rs", "note": "hi"}), &patterned).expect_err("pattern");
+        assert!(
+            err.to_string().contains("evaluated by patternProperties"),
+            "{err}"
+        );
+
+        let bounded = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"properties": {"line": {"type": "integer", "maximum": 2}}}]
+        });
+        let err = normalize(&json!({"path": "a.rs", "line": "9"}), &bounded).expect_err("string");
+        assert!(err.to_string().contains("bounds"), "{err}");
+        let err = normalize(&json!({"path": "a.rs", "line": 9}), &bounded).expect_err("number");
+        assert!(err.to_string().contains("does not accept"), "{err}");
+
+        let sized = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "maxProperties": 1,
+            "allOf": [{"properties": {"line": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"path": "a.rs", "line": "3"}), &sized).expect_err("size");
+        assert!(err.to_string().contains("size"), "{err}");
+
+        let dependent = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "dependentSchemas": {
+                "path": {"properties": {"line": {"type": "integer"}}}
+            }
+        });
+        let repaired =
+            normalize(&json!({"path": "a.rs", "line": "3"}), &dependent).expect("dependent");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+        let limited = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "dependentSchemas": {
+                "path": {"properties": {"line": {"type": "integer", "maximum": 2}}}
+            }
+        });
+        let err =
+            normalize(&json!({"path": "a.rs", "line": "9"}), &limited).expect_err("dependent max");
+        assert!(err.to_string().contains("bounds"), "{err}");
+
+        let duplicate = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "anyOf": [
+                {"properties": {"line": {"type": "integer"}}},
+                {"properties": {"line": {"type": "integer"}}}
+            ]
+        });
+        let repaired =
+            normalize(&json!({"path": "a.rs", "line": "3"}), &duplicate).expect("two anyOf");
+        assert_eq!(repaired.value, json!({"path": "a.rs", "line": "3"}));
+        assert!(repaired.rewrites.is_empty());
+
+        let rival = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "oneOf": [
+                {"properties": {"line": {"type": "integer"}}},
+                {"properties": {"line": {"type": "integer"}}}
+            ]
+        });
+        let err = normalize(&json!({"path": "a.rs", "line": "3"}), &rival).expect_err("two oneOf");
+        assert!(err.to_string().contains("more than one"), "{err}");
+
+        let items = json!({
+            "unevaluatedItems": false,
+            "allOf": [{"prefixItems": [{"type": "integer"}, {"type": "integer"}]}]
+        });
+        let repaired = normalize(&json!(["1", "2"]), &items).expect("items");
+        assert_eq!(repaired.value, json!([1, 2]));
+    }
+
+    #[test]
+    fn applicator_field_is_not_dropped_for_additional_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"line": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"path": "a.rs", "line": "3"}), &schema).expect_err("named");
+        assert!(
+            err.to_string().contains("additionalProperties")
+                && err.to_string().contains("named by a schema branch"),
+            "{err}"
+        );
+
+        let repaired = normalize(&json!({"path": "a.rs", "note": 1}), &schema).expect("junk");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
+
+        let err = normalize(&json!({"path": "a.rs", "line": "3", "note": 1}), &schema)
+            .expect_err("named and junk");
+        assert!(
+            err.to_string().contains("named by a schema branch"),
+            "{err}"
+        );
+
+        let patterned = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"patternProperties": {"^x-": {"type": "string"}}}]
+        });
+        let err =
+            normalize(&json!({"path": "a.rs", "note": "hi"}), &patterned).expect_err("pattern");
+        assert!(
+            err.to_string().contains("evaluated by patternProperties"),
+            "{err}"
+        );
+
+        let both = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "unevaluatedProperties": false,
+            "allOf": [{"properties": {"line": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"path": "a.rs", "line": "3"}), &both).expect_err("both");
+        assert!(err.to_string().contains("additionalProperties"), "{err}");
+
+        let conditional = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "if": {"properties": {"path": {"const": "a.rs"}}},
+            "then": {"properties": {"line": {"type": "integer"}}}
+        });
+        let err = normalize(&json!({"path": "a.rs", "line": "3"}), &conditional).expect_err("then");
+        assert!(
+            err.to_string().contains("named by a schema branch"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn unevaluated_items_false_rejects_an_extra_element() {
         let prefix = json!({
             "prefixItems": [{"type": "integer"}],
