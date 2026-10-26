@@ -959,6 +959,73 @@ mod tests {
     }
 
     #[test]
+    fn pattern_properties_block_an_alias_rename() {
+        let closed = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "patternProperties": {"^file$": {"type": "integer"}}
+        });
+        let err = normalize(&json!({"file": "a.rs"}), &closed).expect_err("pattern owns file");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'file' may be allowed by patternProperties"
+        );
+
+        let unevaluated = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"patternProperties": {"^file$": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"file": "a.rs"}), &unevaluated).expect_err("evaluated pattern");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'file' may be evaluated by patternProperties"
+        );
+
+        let aliased = json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "x-aliases": ["text"]}
+            },
+            "additionalProperties": false,
+            "patternProperties": {"^text$": {"type": "string"}}
+        });
+        let err = normalize(&json!({"text": "hi"}), &aliased).expect_err("alias pattern");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'text' may be allowed by patternProperties"
+        );
+
+        let plain = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"file": "a.rs"}), &plain).expect("plain rename");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
+
+        let alias = json!({
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "x-aliases": ["text"]}
+            },
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"text": "hi"}), &alias).expect("alias rename");
+        assert_eq!(repaired.value, json!({"content": "hi"}));
+
+        let open = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "patternProperties": {"^file$": {"type": "integer"}}
+        });
+        let repaired = normalize(&json!({"file": "a.rs"}), &open).expect("open pattern");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
+    }
+
+    #[test]
     fn two_path_properties_are_ambiguous() {
         let schema = json!({
             "type": "object",

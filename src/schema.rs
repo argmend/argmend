@@ -1846,6 +1846,16 @@ fn normalize_object(
         }
         match alias_target(key, props)? {
             Some(target) => {
+                if (has_pattern_properties(schema) || coverage.open_pattern)
+                    && (denies_unknown(schema) || additional_properties_schema(schema).is_some())
+                {
+                    let reason = if has_pattern_properties(schema) {
+                        format!("unknown key '{key}' may be allowed by patternProperties")
+                    } else {
+                        format!("unknown key '{key}' may be evaluated by patternProperties")
+                    };
+                    return Err(RepairError::Ambiguous(reason));
+                }
                 if PATH_KEYS.contains(&key.as_str())
                     && PATH_KEYS.contains(&target)
                     && applicator_names_property(schema, key)
@@ -1976,7 +1986,8 @@ fn normalized_alias_side(
 /// property that is also a path key (`path`, `file`, `file_path`, `filepath`,
 /// `path_name`). [`normalize_object`] refuses that rename when an applicator
 /// `properties` map lists the incoming key. Parent `properties` are not that
-/// conflict.
+/// conflict. A nonempty `patternProperties` map blocks the rename when this
+/// object would already refuse an unknown key for that reason.
 fn alias_target<'a>(
     key: &str,
     props: &'a Map<String, Value>,
