@@ -439,6 +439,40 @@ mod tests {
     }
 
     #[test]
+    fn fence_with_a_spaced_tag_unwraps() {
+        for raw in [
+            "``` json\n{\"a\": 1}\n```",
+            "``` json5\n{\"a\": 1}\n```",
+            "``` JSON\n{\"a\": 1}\n```",
+            "```\tjsonc\n{\"a\": 1}\n```",
+            "```json\n{\"a\": 1}\n```",
+            "```\n{\"a\": 1}\n```",
+        ] {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value["a"], 1, "{raw:?}");
+                    assert!(
+                        repairs.iter().any(|item| {
+                            item.kind == RewriteKind::Fence
+                                && item.detail.contains("unwrapped markdown fence")
+                        }),
+                        "{raw:?}: {repairs:?}"
+                    );
+                }
+                other => panic!("{raw:?}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            repair_json("``` json5foo\n{\"a\": 1}\n```"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("``` hello\n{\"a\": 1}\n```"),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn fence_then_bare_key() {
         let raw = "```json\n{file: \"a.rs\"}\n```";
         match repair_json(raw) {
