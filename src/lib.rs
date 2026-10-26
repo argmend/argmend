@@ -2661,7 +2661,10 @@ mod tests {
             &schema,
         )
         .expect_err("two junk");
-        assert!(err.to_string().contains("2 unknown"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "unknown keys 'extra' and 'note' and unevaluatedProperties is false"
+        );
 
         let patterned = json!({
             "type": "object",
@@ -3165,6 +3168,97 @@ mod tests {
         });
         let err = normalize(&json!(["1"]), &branches).expect_err("allof");
         assert!(err.to_string().contains("misses contains"), "{err}");
+    }
+
+    #[test]
+    fn max_contains_is_not_reported_as_a_miss() {
+        let miss_const = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": "1"}
+        });
+        let err = normalize(&json!(["1"]), &miss_const).expect_err("const string");
+        assert!(err.to_string().contains("misses contains"), "{err}");
+
+        let miss_max = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"maximum": 3}
+        });
+        let err = normalize(&json!(["9"]), &miss_max).expect_err("above maximum");
+        assert!(err.to_string().contains("misses contains"), "{err}");
+
+        let capped = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"const": 1},
+            "maxContains": 1
+        });
+        let err = normalize(&json!(["1", "1"]), &capped).expect_err("two consts");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let bounded = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"anyOf": [{"maximum": 3}, {"minimum": 10}]},
+            "maxContains": 1
+        });
+        let err = normalize(&json!(["2", "1"]), &bounded).expect_err("two bounds");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let patterned = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "contains": {"anyOf": [{"maximum": 3}, {"pattern": "^a"}]},
+            "maxContains": 1
+        });
+        let err = normalize(&json!(["2", "1", "9"]), &patterned).expect_err("pattern overflow");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let objects = json!({
+            "type": "array",
+            "items": {"type": "object", "properties": {"n": {"type": "integer"}}},
+            "contains": {"properties": {"n": {"anyOf": [{"maximum": 3}]}}},
+            "maxContains": 1
+        });
+        let err = normalize(&json!([{"n": "1"}, {"n": "2"}]), &objects).expect_err("two objects");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+
+        let nested = json!({
+            "type": "array",
+            "items": {"type": "array", "items": {"type": "integer"}},
+            "contains": {"items": {"anyOf": [{"maximum": 3}]}},
+            "maxContains": 0
+        });
+        let err = normalize(&json!([["2"]]), &nested).expect_err("max zero");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
+    }
+
+    #[test]
+    fn closed_object_names_the_keys_it_refused() {
+        let extras = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let err = normalize(&json!({"path": "a.rs", "extra": 1, "other": 2}), &extras)
+            .expect_err("two unknown");
+        assert_eq!(
+            err.to_string(),
+            "unknown keys 'extra' and 'other' and additionalProperties is false"
+        );
+
+        let required = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": false
+        });
+        let err = normalize(&json!({"extra": 1}), &required).expect_err("missing path");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'extra' and required key 'path' is missing"
+        );
     }
 
     #[test]
@@ -4719,7 +4813,7 @@ mod tests {
             "maxContains": 1
         });
         let err = normalize(&json!(["2", "1", "9"]), &over).expect_err("over max");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
         let kept = normalize(&json!(["2", "9"]), &over).expect("maybe over max");
         assert_eq!(kept.value[0], 2);
         assert_eq!(kept.value[1], 9);
@@ -4737,7 +4831,7 @@ mod tests {
         assert_eq!(repaired.value[0], 2);
         assert_eq!(repaired.value[1], 9);
         let err = normalize(&json!(["2", "1"]), &bounded).expect_err("two real hits");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
 
         let wrapped = json!({
             "type": "array",
@@ -4786,7 +4880,7 @@ mod tests {
         assert_eq!(repaired.value[0]["n"], 9);
         assert_eq!(repaired.value[1]["n"], 1);
         let err = normalize(&json!([{"n": "1"}, {"n": "2"}]), &root).expect_err("two real hits");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
 
         let items = json!({
             "type": "array",
@@ -4798,7 +4892,7 @@ mod tests {
         let repaired = normalize(&json!([["9"]]), &items).expect("zero hits is inside max 0");
         assert_eq!(repaired.value[0][0], 9);
         let err = normalize(&json!([["2"]]), &items).expect_err("one hit over max 0");
-        assert!(err.to_string().contains("misses contains"), "{err}");
+        assert!(err.to_string().contains("outside maxContains"), "{err}");
     }
 
     #[test]

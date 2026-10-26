@@ -81,10 +81,8 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
                 "coerced value repeats an array item".into(),
             ));
         }
-        if violates_contains(schema, &next) {
-            return Err(RepairError::Ambiguous(
-                "coerced value misses contains".into(),
-            ));
+        if let Some(reason) = contains_refusal(schema, &next) {
+            return Err(RepairError::Ambiguous(reason.into()));
         }
         if outside_const_or_enum(schema, &next) {
             return Err(RepairError::Ambiguous(
@@ -1175,7 +1173,7 @@ fn contains_settled(schema: &Value, value: &Value) -> Settled {
         }
     }
     if max.is_some_and(|limit| yes > limit) {
-        return Settled::No("coerced value misses contains".to_string());
+        return Settled::No("coerced value is outside maxContains".to_string());
     }
     let within_max = match max {
         None => true,
@@ -1408,8 +1406,8 @@ fn constraint_failure(schema: &Value, value: &Value) -> Option<&'static str> {
     if violates_unique(schema, value) {
         return Some("coerced value repeats an array item");
     }
-    if violates_contains(schema, value) {
-        return Some("coerced value misses contains");
+    if let Some(reason) = contains_refusal(schema, value) {
+        return Some(reason);
     }
     if violates_size(schema, value) {
         return Some("coerced value is outside the schema size");
@@ -1691,19 +1689,18 @@ fn integer_limit(schema: &Value, key: &str) -> Option<u64> {
 /// `contains` fails when too few or too many items match.
 /// `minContains` defaults to 1. A limit that is not an integer is ignored.
 fn violates_contains(schema: &Value, value: &Value) -> bool {
-    let Some(contains) = schema.get("contains").filter(|schema| schema.is_object()) else {
-        return false;
-    };
-    let Some(items) = value.as_array() else {
-        return false;
-    };
-    let Some((min, max)) = contain_limits(schema) else {
-        return false;
-    };
-    // An applicator this walker cannot enter is not a hit.
-    // [`contains_settled`] counts those items.
+    contains_refusal(schema, value).is_some()
+}
+
+/// Too few matches miss `contains`. A count above `maxContains` does not.
+/// An applicator this walker cannot enter is not a hit.
+/// [`contains_settled`] counts those items.
+fn contains_refusal(schema: &Value, value: &Value) -> Option<&'static str> {
+    let contains = schema.get("contains").filter(|schema| schema.is_object())?;
+    let items = value.as_array()?;
+    let (min, max) = contain_limits(schema)?;
     if contains_count_needs_settled(contains) {
-        return false;
+        return None;
     }
     let count = u64::try_from(
         items
@@ -1712,7 +1709,13 @@ fn violates_contains(schema: &Value, value: &Value) -> bool {
             .count(),
     )
     .unwrap_or(u64::MAX);
-    count < min || max.is_some_and(|limit| count > limit)
+    if max.is_some_and(|limit| count > limit) {
+        return Some("coerced value is outside maxContains");
+    }
+    if count < min {
+        return Some("coerced value misses contains");
+    }
+    None
 }
 
 /// `branch_accepts` treats an applicator it does not enter as a match,
@@ -2037,10 +2040,7 @@ fn normalize_object(
         refuse_covered_unknown(schema, &unknown, &coverage)?;
         if unknown.len() > 1 {
             let reason = unknown_denial(schema).unwrap_or("unknown keys are forbidden");
-            return Err(RepairError::Ambiguous(format!(
-                "{} unknown keys and {reason}",
-                unknown.len()
-            )));
+            return Err(RepairError::Ambiguous(named_unknown_keys(&unknown, reason)));
         }
         if let Some((key, _)) = unknown.pop() {
             let ready = required_present(schema, &out);
@@ -2052,6 +2052,10 @@ fn normalize_object(
             } else if ready {
                 return Err(RepairError::Ambiguous(format!(
                     "refusing to drop the only key '{key}'"
+                )));
+            } else if let Some(missing) = first_missing_required(schema, &out) {
+                return Err(RepairError::Ambiguous(format!(
+                    "unknown key '{key}' and required key '{missing}' is missing"
                 )));
             } else {
                 return Err(RepairError::Ambiguous(format!(
@@ -2504,18 +2508,34 @@ fn required_holds(schema: &Value, value: &Value) -> bool {
 }
 
 fn required_present(schema: &Value, out: &Map<String, Value>) -> bool {
+    first_missing_required(schema, out).is_none()
+}
+
+fn first_missing_required<'a>(schema: &'a Value, out: &Map<String, Value>) -> Option<&'a str> {
     let schema = if schema.get("properties").is_none() {
         schema.get("parameters").unwrap_or(schema)
     } else {
         schema
     };
-    let Some(required) = schema.get("required").and_then(Value::as_array) else {
-        return true;
-    };
+    let required = schema.get("required").and_then(Value::as_array)?;
     required
         .iter()
         .filter_map(Value::as_str)
-        .all(|name| out.contains_key(name))
+        .find(|name| !out.contains_key(*name))
+}
+
+/// Names every unknown key, in map order. Two keys read as a pair.
+fn named_unknown_keys(unknown: &[(String, Value)], reason: &str) -> String {
+    let names: Vec<String> = unknown.iter().map(|(key, _)| format!("'{key}'")).collect();
+    let listed = match names.as_slice() {
+        [first, second] => format!("unknown keys {first} and {second}"),
+        [first, middle @ .., last] => {
+            let rest = middle.join(", ");
+            format!("unknown keys {first}, {rest}, and {last}")
+        }
+        _ => format!("{} unknown keys", names.len()),
+    };
+    format!("{listed} and {reason}")
 }
 
 /// An array value uses `items`, `prefixItems`, or `unevaluatedItems` even
