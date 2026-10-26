@@ -2157,6 +2157,90 @@ mod tests {
     }
 
     #[test]
+    fn integer_string_above_i64_max_coerces_when_it_fits_u64() {
+        let integer = json!({"type": "integer"});
+        let number = json!({"type": "number"});
+
+        let repaired = normalize(&json!("9223372036854775808"), &integer).expect("above i64");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(repaired.value.as_i64().is_none());
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string 9223372036854775808"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let repaired = normalize(&json!("18446744073709551615"), &integer).expect("u64 max");
+        assert_eq!(repaired.value.as_u64(), Some(18446744073709551615));
+        assert!(repaired.value.as_i64().is_none());
+
+        let kept = json!("18446744073709551616");
+        let repaired = normalize(&kept, &integer).expect("past u64");
+        assert_eq!(repaired.value, kept);
+        assert!(repaired.rewrites.is_empty());
+
+        let repaired = normalize(&json!("+9223372036854775808"), &integer).expect("unary plus");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string +9223372036854775808"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let repaired = normalize(&json!("9223372036854775808.0"), &integer).expect("zero fraction");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string 9223372036854775808.0"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let repaired = normalize(&json!("9223372036854775808"), &number).expect("number");
+        assert_eq!(repaired.value.as_u64(), Some(9223372036854775808));
+        assert!(repaired.value.as_i64().is_none());
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "number string 9223372036854775808"),
+            "{:?}",
+            repaired.rewrites
+        );
+
+        let raw = json!("+-5");
+        let repaired = normalize(&raw, &integer).expect("second sign");
+        assert_eq!(repaired.value, raw);
+        assert!(repaired.rewrites.is_empty());
+
+        let repaired = normalize(&json!("01"), &integer).expect("leading zero");
+        assert_eq!(repaired.value, "01");
+        assert!(repaired.rewrites.is_empty());
+
+        let repaired = normalize(&json!("9223372036854775807"), &integer).expect("i64 max");
+        assert_eq!(repaired.value.as_i64(), Some(9223372036854775807));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string 9223372036854775807")
+        );
+
+        let bounded = json!({"type": "integer", "maximum": 10});
+        let err = normalize(&json!("9223372036854775809"), &bounded).expect_err("above maximum");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
+        assert!(err.to_string().contains("bounds"), "{err}");
+    }
+
+    #[test]
     fn dependent_schema_applies_when_the_property_is_present() {
         let schema = json!({
             "dependentSchemas": {

@@ -581,11 +581,18 @@ fn outer_property_rejected(
 }
 
 fn violates_bounds(schema: &Value, value: &Value) -> bool {
-    // An i64 past 2^53 is not an exact f64, so the float path would skip
-    // the bound. Compare it with each bound as an integer when the bound's
-    // integer part is exact, including a fraction such as 10.5.
+    // An i64 past 2^53, or a u64 past i64::MAX, is not an exact f64, so the
+    // float path would skip the bound. Compare it with each bound as an
+    // integer when the bound's integer part is exact, including a fraction
+    // such as 10.5.
     if let Some(int) = value.as_i64()
         && let Some(outside) = i64_against_schema_bounds(schema, int)
+    {
+        return outside;
+    }
+    if value.as_i64().is_none()
+        && let Some(int) = value.as_u64()
+        && let Some(outside) = u64_against_schema_bounds(schema, int)
     {
         return outside;
     }
@@ -662,6 +669,89 @@ fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) 
 
 fn cmp_i64_f64(int: i64, limit: f64) -> Ordering {
     let trunc = limit.trunc() as i64;
+    match int.cmp(&trunc) {
+        Ordering::Equal if limit == limit.trunc() => Ordering::Equal,
+        Ordering::Equal if limit > trunc as f64 => Ordering::Less,
+        Ordering::Equal => Ordering::Greater,
+        other => other,
+    }
+}
+
+fn u64_against_schema_bounds(schema: &Value, int: u64) -> Option<bool> {
+    for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+        let Some(bound) = schema.get(key) else {
+            continue;
+        };
+        if bound.is_boolean() {
+            continue;
+        }
+        if bound.as_i64().is_none()
+            && bound.as_u64().is_none()
+            && comparable_f64_bound(bound).is_none()
+        {
+            return None;
+        }
+    }
+    Some(u64_outside_bounds(schema, int))
+}
+
+fn u64_outside_bounds(schema: &Value, int: u64) -> bool {
+    if u64_bound_fails(schema, int, "exclusiveMinimum", true, true) {
+        return true;
+    }
+    let minimum_exclusive = matches!(schema.get("exclusiveMinimum"), Some(Value::Bool(true)));
+    if u64_bound_fails(schema, int, "minimum", minimum_exclusive, true) {
+        return true;
+    }
+    if u64_bound_fails(schema, int, "exclusiveMaximum", true, false) {
+        return true;
+    }
+    let maximum_exclusive = matches!(schema.get("exclusiveMaximum"), Some(Value::Bool(true)));
+    u64_bound_fails(schema, int, "maximum", maximum_exclusive, false)
+}
+
+fn u64_bound_fails(schema: &Value, int: u64, key: &str, exclusive: bool, low: bool) -> bool {
+    let Some(bound) = schema.get(key) else {
+        return false;
+    };
+    if bound.is_boolean() {
+        return false;
+    }
+    let Some(order) = cmp_u64_bound(int, bound) else {
+        return false;
+    };
+    if low {
+        if exclusive {
+            order.is_le()
+        } else {
+            order.is_lt()
+        }
+    } else if exclusive {
+        order.is_ge()
+    } else {
+        order.is_gt()
+    }
+}
+
+fn cmp_u64_bound(int: u64, bound: &Value) -> Option<Ordering> {
+    if let Some(limit) = bound.as_i64() {
+        return Some(match u64::try_from(limit) {
+            Ok(limit) => int.cmp(&limit),
+            Err(_) => Ordering::Greater,
+        });
+    }
+    if let Some(limit) = bound.as_u64() {
+        return Some(int.cmp(&limit));
+    }
+    let limit = comparable_f64_bound(bound)?;
+    Some(cmp_u64_f64(int, limit))
+}
+
+fn cmp_u64_f64(int: u64, limit: f64) -> Ordering {
+    if limit < 0.0 {
+        return Ordering::Greater;
+    }
+    let trunc = limit.trunc() as u64;
     match int.cmp(&trunc) {
         Ordering::Equal if limit == limit.trunc() => Ordering::Equal,
         Ordering::Equal if limit > trunc as f64 => Ordering::Less,
@@ -2830,20 +2920,27 @@ fn record_constrained(text: &str, matched: &Value, schema: &Value, rewrites: &mu
 }
 
 /// One leading `+` is unary plus. A second sign (`+-5`) is not a number
-/// token. `const` and `enum` use this parser and follow the same rule.
+/// token. An integer that fits in `u64` but not `i64` is still that integer.
+/// `const` and `enum` use this parser and follow the same rule.
 fn integer_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = without_unary_plus(&text);
     if text.is_empty() || !is_integer_token(text) || has_leading_zero(text) {
         return None;
     }
-    let parsed = text.parse::<i64>().ok()?;
-    Some(serde_json::Number::from(parsed))
+    if let Ok(parsed) = text.parse::<i64>() {
+        return Some(serde_json::Number::from(parsed));
+    }
+    if text.starts_with('-') {
+        return None;
+    }
+    text.parse::<u64>().ok().map(serde_json::Number::from)
 }
 
 /// `"3.0"`, `"-2.000"`, and `"1."` are integers. `"3.10"` and `"03.0"` are not.
 /// One leading `+` is unary plus. A second sign (`+-2.0`) is not a number
-/// token. `const` and `enum` use this parser and follow the same rule.
+/// token. An integer that fits in `u64` but not `i64` is still that integer.
+/// `const` and `enum` use this parser and follow the same rule.
 fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = without_unary_plus(&text);
@@ -2864,12 +2961,18 @@ fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
         digits.push('-');
     }
     digits.push_str(whole);
-    let parsed = digits.parse::<i64>().ok()?;
-    Some(serde_json::Number::from(parsed))
+    if let Ok(parsed) = digits.parse::<i64>() {
+        return Some(serde_json::Number::from(parsed));
+    }
+    if negative {
+        return None;
+    }
+    digits.parse::<u64>().ok().map(serde_json::Number::from)
 }
 
 /// One leading `+` is unary plus. A second sign (`+-1.5`, `+-1e2`) is not a
-/// number token. `const` and `enum` use this parser and follow the same rule.
+/// number token. An integer that fits in `u64` but not `i64` is still that
+/// integer. `const` and `enum` use this parser and follow the same rule.
 fn number_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
     let text = without_unary_plus(&text);
