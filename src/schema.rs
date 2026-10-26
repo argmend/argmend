@@ -2723,9 +2723,11 @@ fn record_constrained(text: &str, matched: &Value, schema: &Value, rewrites: &mu
     }
 }
 
+/// One leading `+` is unary plus. A second sign (`+-5`) is not a number
+/// token. `const` and `enum` use this parser and follow the same rule.
 fn integer_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
-    let text = text.strip_prefix('+').unwrap_or(&text);
+    let text = without_unary_plus(&text);
     if text.is_empty() || !is_integer_token(text) || has_leading_zero(text) {
         return None;
     }
@@ -2734,9 +2736,11 @@ fn integer_string(text: &str) -> Option<serde_json::Number> {
 }
 
 /// `"3.0"`, `"-2.000"`, and `"1."` are integers. `"3.10"` and `"03.0"` are not.
+/// One leading `+` is unary plus. A second sign (`+-2.0`) is not a number
+/// token. `const` and `enum` use this parser and follow the same rule.
 fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
-    let text = text.strip_prefix('+').unwrap_or(&text);
+    let text = without_unary_plus(&text);
     let (negative, rest) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text),
@@ -2758,9 +2762,11 @@ fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     Some(serde_json::Number::from(parsed))
 }
 
+/// One leading `+` is unary plus. A second sign (`+-1.5`, `+-1e2`) is not a
+/// number token. `const` and `enum` use this parser and follow the same rule.
 fn number_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
-    let text = text.strip_prefix('+').unwrap_or(&text);
+    let text = without_unary_plus(&text);
     if let Some(number) = integer_string(text) {
         return Some(number);
     }
@@ -2882,6 +2888,14 @@ fn has_leading_zero(text: &str) -> bool {
     let digits = mantissa.strip_prefix('-').unwrap_or(mantissa);
     let whole = digits.split('.').next().unwrap_or(digits);
     whole.len() > 1 && whole.starts_with('0')
+}
+
+/// `+5` loses the plus. `+-5`, `++5`, and a lone `+` stay as written.
+fn without_unary_plus(text: &str) -> &str {
+    match text.strip_prefix('+') {
+        Some(rest) if !rest.is_empty() && !rest.starts_with(['+', '-']) => rest,
+        _ => text,
+    }
 }
 
 fn is_integer_token(text: &str) -> bool {

@@ -1861,6 +1861,99 @@ mod tests {
     }
 
     #[test]
+    fn second_sign_is_not_a_number_token() {
+        let integer = json!({"type": "integer"});
+        let number = json!({"type": "number"});
+        for raw in ["+-5", "+-2.0"] {
+            let value = serde_json::Value::String(raw.to_string());
+            let repaired = normalize(&value, &integer).expect(raw);
+            assert_eq!(repaired.value, value, "{raw}");
+            assert!(
+                repaired.rewrites.is_empty(),
+                "{raw} {:?}",
+                repaired.rewrites
+            );
+        }
+        for raw in ["+-1.5", "+-1e2"] {
+            let value = serde_json::Value::String(raw.to_string());
+            let repaired = normalize(&value, &number).expect(raw);
+            assert_eq!(repaired.value, value, "{raw}");
+            assert!(
+                repaired.rewrites.is_empty(),
+                "{raw} {:?}",
+                repaired.rewrites
+            );
+        }
+        let value = serde_json::Value::String("+-2".to_string());
+        let repaired = normalize(&value, &json!({"enum": [-2, 5]})).expect("enum");
+        assert_eq!(repaired.value, value);
+        assert!(repaired.rewrites.is_empty(), "{:?}", repaired.rewrites);
+        let repaired = normalize(&value, &json!({"const": -2})).expect("const");
+        assert_eq!(repaired.value, value);
+        assert!(repaired.rewrites.is_empty(), "{:?}", repaired.rewrites);
+
+        let repaired = normalize(&json!("+5"), &integer).expect("+5");
+        assert_eq!(repaired.value, 5);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string +5"),
+            "{:?}",
+            repaired.rewrites
+        );
+        let repaired = normalize(&json!("-5"), &integer).expect("-5");
+        assert_eq!(repaired.value, -5);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string -5")
+        );
+        let repaired = normalize(&json!("+2.0"), &integer).expect("+2.0");
+        assert_eq!(repaired.value, 2);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string +2.0")
+        );
+        let repaired = normalize(&json!("-2.0"), &integer).expect("-2.0");
+        assert_eq!(repaired.value, -2);
+        let repaired = normalize(&json!("+1.5"), &number).expect("+1.5");
+        assert_eq!(repaired.value.as_f64(), Some(1.5));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "number string +1.5")
+        );
+        let repaired = normalize(&json!("+1e2"), &number).expect("+1e2");
+        assert_eq!(repaired.value.as_f64(), Some(100.0));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "number string +1e2")
+        );
+        for raw in ["++5", "-+5", "--5"] {
+            let value = serde_json::Value::String(raw.to_string());
+            let repaired = normalize(&value, &integer).expect(raw);
+            assert_eq!(repaired.value, value, "{raw}");
+            assert!(repaired.rewrites.is_empty(), "{raw}");
+        }
+        match repair_json(r#"{"a": +-5}"#) {
+            RepairOutcome::Unfixable(reason) => {
+                assert!(
+                    reason.contains("parse failed after all repairs"),
+                    "{reason}"
+                );
+            }
+            other => panic!("bare +-5 {other:?}"),
+        }
+    }
+
+    #[test]
     fn dependent_schema_applies_when_the_property_is_present() {
         let schema = json!({
             "dependentSchemas": {
