@@ -6,6 +6,8 @@
 //! An unchanged subtree is not rechecked: a sibling string that is not a
 //! number stays a string, and that value can still violate its schema.
 
+use std::collections::BTreeSet;
+
 use argmend::{RepairOutcome, RepairRequest, normalize, repair_args, repair_json};
 use proptest::prelude::*;
 use serde_json::{Map, Value, json};
@@ -380,6 +382,9 @@ fn object_violation(
     before: &Map<String, Value>,
     after: &Map<String, Value>,
 ) -> Option<String> {
+    if let Some(reason) = dropped_allof_property(schema, before, after) {
+        return Some(reason);
+    }
     if let Some(reason) = keyword_violation(schema, &Value::Object(after.clone())) {
         return Some(reason);
     }
@@ -405,6 +410,47 @@ fn object_violation(
         None
     } else {
         Some("object applicators".to_string())
+    }
+}
+
+/// A successful repair must not delete a key an `allOf` branch lists.
+/// `unevaluatedProperties` evaluated that key. `additionalProperties`
+/// would reject it, and deleting it is a different outcome.
+fn dropped_allof_property(
+    schema: &Value,
+    before: &Map<String, Value>,
+    after: &Map<String, Value>,
+) -> Option<String> {
+    let unevaluated = schema.get("additionalProperties").is_none()
+        && schema.get("unevaluatedProperties") == Some(&Value::Bool(false));
+    let additional = schema.get("additionalProperties") == Some(&Value::Bool(false));
+    if !unevaluated && !additional {
+        return None;
+    }
+    let named = allof_property_names(schema);
+    let dropped = before
+        .keys()
+        .find(|key| !after.contains_key(*key) && named.contains(*key))?;
+    Some(format!("dropped '{dropped}' named by allOf"))
+}
+
+fn allof_property_names(schema: &Value) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_allof_names(schema, &mut names, false);
+    names
+}
+
+fn collect_allof_names(schema: &Value, names: &mut BTreeSet<String>, in_allof: bool) {
+    let Some(map) = schema.as_object() else {
+        return;
+    };
+    if in_allof && let Some(props) = map.get("properties").and_then(Value::as_object) {
+        names.extend(props.keys().cloned());
+    }
+    if let Some(branches) = map.get("allOf").and_then(Value::as_array) {
+        for branch in branches {
+            collect_allof_names(branch, names, true);
+        }
     }
 }
 
@@ -573,6 +619,21 @@ fn arb_schema() -> impl Strategy<Value = Value> {
             }),
             (inner.clone(), inner.clone())
                 .prop_map(|(left, right)| json!({"allOf": [left, right]})),
+            (arb_key(), arb_key(), inner.clone(), any::<bool>()).prop_map(
+                |(known, extra, child, additional)| {
+                    let mut schema = json!({
+                        "type": "object",
+                        "properties": {known: {"type": "string"}},
+                        "allOf": [{"properties": {extra: child}}]
+                    });
+                    if additional {
+                        schema["additionalProperties"] = json!(false);
+                    } else {
+                        schema["unevaluatedProperties"] = json!(false);
+                    }
+                    schema
+                },
+            ),
             (inner.clone(), inner.clone())
                 .prop_map(|(left, right)| json!({"anyOf": [left, right]})),
             (inner.clone(), inner.clone())
@@ -717,6 +778,36 @@ fn unicode_padding_repairs_once() {
     assert_eq!(value, json!({"a": 1}));
     let text = serde_json::to_string(&value).expect("serialize");
     assert!(matches!(repair_json(&text), RepairOutcome::Valid(_)));
+}
+
+#[test]
+fn checker_rejects_a_dropped_applicator_field() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "unevaluatedProperties": false,
+        "allOf": [{"properties": {"line": {"type": "integer"}}}]
+    });
+    let before = json!({"path": "a.rs", "line": "3"});
+    let stripped = json!({"path": "a.rs"});
+    let reason = rewritten_violation(&schema, &before, &stripped);
+    assert!(
+        reason.as_ref().is_some_and(|text| text.contains("line")),
+        "{reason:?}"
+    );
+
+    let repaired = normalize(&before, &schema).expect("keep");
+    assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
+    assert!(rewritten_violation(&schema, &before, &repaired.value).is_none());
+
+    let additional = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "additionalProperties": false,
+        "allOf": [{"properties": {"line": {"type": "integer"}}}]
+    });
+    assert!(rewritten_violation(&additional, &before, &stripped).is_some());
+    assert!(normalize(&before, &additional).is_err());
 }
 
 #[test]
