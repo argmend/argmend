@@ -1,7 +1,9 @@
 //! Schema salvage for an already-parsed argument value.
 //!
 //! Valid JSON is not rewritten unless the schema asks for a rename, a
-//! string coercion, or the drop of one unknown key.
+//! string coercion, or the drop of one unknown key. [`normalize`] does
+//! not accept or reject the original value. See that function for the
+//! keywords this crate leaves unused.
 
 use std::cmp::Ordering;
 
@@ -11,6 +13,17 @@ use crate::{RepairError, Repaired, Rewrite, RewriteKind};
 
 const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name"];
 
+/// Apply a tool schema to an already-parsed value.
+///
+/// `Ok` means this crate produced a value. It does not mean the schema
+/// accepts that value. An unchanged value can still miss `required`, fail
+/// `pattern` or `format`, or depend on an unresolved `$ref`.
+///
+/// A JSON boolean schema is unused. `true` and `false` both return the
+/// value with no rewrites. A string whose text is JSON stays a string when
+/// the schema type is an object or an array. `$ref` and `$dynamicRef` are
+/// not resolved. They do not veto a sibling `type`, and they do not hide a
+/// sibling bound such as `maximum`.
 pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError> {
     let (next, rewrites) = normalize_child(value, schema)?;
     Ok(Repaired {
