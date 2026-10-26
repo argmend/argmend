@@ -823,6 +823,107 @@ mod tests {
     }
 
     #[test]
+    fn path_alias_does_not_rename_a_branch_property() {
+        fn expect_conflict(schema: &Value, value: Value, key: &str, target: &str) {
+            let err = normalize(&value, schema).expect_err("alias conflict");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "'{key}' is named by a schema branch and is also a path alias for '{target}'"
+                )
+            );
+        }
+
+        let closed = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "additionalProperties": false,
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(&closed, json!({"mode": "r", "file": "a"}), "file", "path");
+
+        let unevaluated = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "unevaluatedProperties": false,
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(
+            &unevaluated,
+            json!({"mode": "r", "file": "a"}),
+            "file",
+            "path",
+        );
+
+        let open = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(&open, json!({"file": "a"}), "file", "path");
+
+        let reverse = json!({
+            "type": "object",
+            "properties": {"file": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"path": {"type": "string"}}}]
+        });
+        expect_conflict(&reverse, json!({"path": "a.rs"}), "path", "file");
+
+        let file_path = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"file_path": {"type": "string"}}}]
+        });
+        expect_conflict(
+            &file_path,
+            json!({"file_path": "a.rs"}),
+            "file_path",
+            "path",
+        );
+
+        let plain = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"file": "a.rs"}), &plain).expect("plain rename");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
+
+        let line = json!({
+            "type": "object",
+            "properties": {"mode": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"line": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"mode": "r", "line": "3"}), &line).expect_err("line");
+        assert!(
+            err.to_string().contains("named by a schema branch")
+                && err.to_string().contains("additionalProperties"),
+            "{err}"
+        );
+
+        let both = json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "x-aliases": ["file"]}
+            },
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(&both, json!({"file": "a.rs"}), "file", "path");
+    }
+
+    #[test]
     fn two_path_properties_are_ambiguous() {
         let schema = json!({
             "type": "object",

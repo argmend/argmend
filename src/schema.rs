@@ -29,7 +29,9 @@ const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name
 /// `unevaluatedProperties: false` keeps a property that `allOf`, `anyOf`,
 /// `oneOf`, `if` / `then` / `else`, or a dependent schema evaluated.
 /// `additionalProperties: false` does not look inside those branches. A key
-/// one of them names is ambiguous instead of dropped.
+/// one of them names is ambiguous instead of dropped. A path alias does not
+/// rename a key one of those branches lists under `properties`. The same
+/// refusal applies when the object is open.
 pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError> {
     let (next, rewrites) = normalize_child(value, schema)?;
     Ok(Repaired {
@@ -1842,6 +1844,14 @@ fn normalize_object(
         }
         match alias_target(key, props)? {
             Some(target) => {
+                if PATH_KEYS.contains(&key.as_str())
+                    && PATH_KEYS.contains(&target)
+                    && applicator_names_property(schema, key)
+                {
+                    return Err(RepairError::Ambiguous(format!(
+                        "'{key}' is named by a schema branch and is also a path alias for '{target}'"
+                    )));
+                }
                 // The canonical key may already have been coerced into `out`.
                 // Compare both sides after the property schema, so `"1"` and
                 // `1` agree, and key order does not change the result.
@@ -1958,6 +1968,13 @@ fn normalized_alias_side(
     Ok(out.get(target).cloned())
 }
 
+/// Parent property this key renames to.
+///
+/// An `x-aliases` entry wins. A path key otherwise renames to the one parent
+/// property that is also a path key (`path`, `file`, `file_path`, `filepath`,
+/// `path_name`). [`normalize_object`] refuses that rename when an applicator
+/// `properties` map lists the incoming key. Parent `properties` are not that
+/// conflict.
 fn alias_target<'a>(
     key: &str,
     props: &'a Map<String, Value>,
@@ -1981,6 +1998,31 @@ fn alias_target<'a>(
             "'{key}' matches more than one property"
         ))),
     }
+}
+
+/// `true` when an applicator branch lists `key` under `properties`.
+/// This object's own `properties` map does not count.
+fn applicator_names_property(schema: &Value, key: &str) -> bool {
+    let mut mentioned = BTreeSet::new();
+    let schema = schema_view(schema);
+    let Some(map) = schema.as_object() else {
+        return false;
+    };
+    for keyword in ["allOf", "anyOf", "oneOf", "if", "then", "else"] {
+        match map.get(keyword) {
+            Some(Value::Array(branches)) => {
+                for branch in branches {
+                    mention_applicator(branch, &mut mentioned);
+                }
+            }
+            Some(child) => mention_applicator(child, &mut mentioned),
+            None => {}
+        }
+    }
+    for (_, sub) in dependent_object_schemas(schema) {
+        mention_applicator(sub, &mut mentioned);
+    }
+    mentioned.contains(key)
 }
 
 fn property_lists_alias(prop: &Value, key: &str) -> bool {
