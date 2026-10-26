@@ -2185,9 +2185,12 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 
 /// Strip `//` and `#` line comments and `/* ... */` block comments.
 ///
-/// Single-quoted strings are skipped, same as double-quoted strings.
-/// Quote repair runs after this stage, so `//` inside `'http://example.com'`
-/// is part of the value. A `#` inside a string is also kept.
+/// Double-quoted strings are copied until the next unescaped `"`.
+/// Inside a single-quoted string, a `'` followed by an ASCII letter or
+/// digit stays in the value. Any other `'` closes the string, and an
+/// unclosed string does not gain a closer. Quote repair runs after this
+/// stage, so `//` inside `'http://example.com'` is part of the value.
+/// A `#` inside a string is also kept.
 pub(crate) fn strip_json_comments(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -2196,11 +2199,10 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
 
     while i < len {
         match chars[i] {
-            '"' | '\'' => {
-                let quote = chars[i];
-                out.push(quote);
+            '"' => {
+                out.push('"');
                 i += 1;
-                while i < len && chars[i] != quote {
+                while i < len && chars[i] != '"' {
                     if chars[i] == '\\' {
                         out.push(chars[i]);
                         i += 1;
@@ -2214,7 +2216,38 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                     }
                 }
                 if i < len {
-                    out.push(quote);
+                    out.push('"');
+                    i += 1;
+                }
+            }
+            '\'' => {
+                out.push('\'');
+                i += 1;
+                while i < len {
+                    if chars[i] == '\\' {
+                        out.push(chars[i]);
+                        i += 1;
+                        if i < len {
+                            out.push(chars[i]);
+                            i += 1;
+                        }
+                    } else if chars[i] == '\'' {
+                        let inside = chars
+                            .get(i + 1)
+                            .is_some_and(|next| next.is_ascii_alphanumeric());
+                        if inside {
+                            out.push('\'');
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                if i < len {
+                    out.push('\'');
                     i += 1;
                 }
             }
@@ -3342,6 +3375,42 @@ mod tests {
             RepairOutcome::Repaired { value, .. } => {
                 assert_eq!(value["url"], "http://example.com/a");
                 assert_eq!(value["note"], "keep /* this */");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apostrophe_inside_single_quotes_keeps_a_later_comment() {
+        match repair_tool_call_json("{'note': 'O'Reilly // secret'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["note"], "O'Reilly // secret");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{'note': 'O'Reilly /* secret */'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["note"], "O'Reilly /* secret */");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{'note': 'O'Reilly'} // tail") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value.to_string(), r#"{"note":"O'Reilly"}"#);
+                assert!(!value.to_string().contains("tail"));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{'note': 'O'Reilly # tag'} // real") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["note"], "O'Reilly # tag");
+                assert!(!value.to_string().contains("real"));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{'msg': 'don't // keep'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["msg"], "don't // keep");
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
