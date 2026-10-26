@@ -27,6 +27,7 @@ use super::{RepairError, RepairOutcome, Rewrite, RewriteKind};
 /// 12. Replace unicode whitespace between tokens.
 /// 13. Replace `=` and `=>` between a key and a value.
 /// 14. Insert a missing colon. A later word in a bare phrase is not a new key.
+///     An unescaped quote after a finished string value is ambiguous.
 /// 15. Quote bare keys.
 /// 16. Replace Python `True`, `False`, and `None`.
 /// 17. Quote one bare value word. A word cut off at end of input stays bare.
@@ -48,7 +49,7 @@ fn syntax_note(detail: &str) -> Rewrite {
     }
 }
 
-pub(crate) fn apply_stages(raw: &str) -> Staged {
+pub(crate) fn apply_stages(raw: &str) -> Result<Staged, RepairError> {
     let mut text = raw.to_string();
     let mut repairs = Vec::new();
 
@@ -133,7 +134,7 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
-    let cleaned = insert_missing_colons(&text);
+    let cleaned = insert_missing_colons(&text)?;
     if cleaned != text {
         repairs.push(syntax_note("inserted missing colons"));
         text = cleaned;
@@ -193,14 +194,18 @@ pub(crate) fn apply_stages(raw: &str) -> Staged {
         text = cleaned;
     }
 
-    Staged { text, repairs }
+    Ok(Staged { text, repairs })
 }
 
 pub(crate) fn repair_tool_call_json(raw: &str) -> RepairOutcome {
     if let Ok(value) = serde_json::from_str(raw) {
         return outcome_with_unique_keys(raw, value, Vec::new());
     }
-    let staged = apply_stages(raw);
+    let staged = match apply_stages(raw) {
+        Ok(staged) => staged,
+        Err(RepairError::Ambiguous(reason)) => return RepairOutcome::Ambiguous(reason),
+        Err(RepairError::Unfixable(reason)) => return RepairOutcome::Unfixable(reason),
+    };
     match serde_json::from_str(&staged.text) {
         Ok(value) => outcome_with_unique_keys(&staged.text, value, staged.repairs),
         Err(e) => RepairOutcome::Unfixable(format!("parse failed after all repairs: {e}")),
@@ -486,12 +491,15 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
             '\'' => {
                 out.push('"');
                 i += 1;
-                while i < len && chars[i] != '\'' {
+                while i < len {
                     if chars[i] == '\\' {
                         i += 1;
                         if i < len {
                             // `\'` is an apostrophe. Copied through, it is
-                            // not a legal JSON escape, so the repair failed.
+                            // not a legal JSON escape, so the backslash stays
+                            // off. An unescaped `'` followed by a letter or
+                            // digit also stays in the value. A delimiter
+                            // still closes the string.
                             if chars[i] == '\'' {
                                 out.push('\'');
                             } else {
@@ -500,16 +508,27 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                             }
                             i += 1;
                         }
-                    } else {
-                        match chars[i] {
-                            '"' => out.push_str("\\\""),
-                            '\n' => out.push_str("\\n"),
-                            '\r' => out.push_str("\\r"),
-                            '\t' => out.push_str("\\t"),
-                            other => out.push(other),
-                        }
-                        i += 1;
+                        continue;
                     }
+                    if chars[i] == '\'' {
+                        let inside = chars
+                            .get(i + 1)
+                            .is_some_and(|next| next.is_ascii_alphanumeric());
+                        if inside {
+                            out.push('\'');
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    match chars[i] {
+                        '"' => out.push_str("\\\""),
+                        '\n' => out.push_str("\\n"),
+                        '\r' => out.push_str("\\r"),
+                        '\t' => out.push_str("\\t"),
+                        other => out.push(other),
+                    }
+                    i += 1;
                 }
                 out.push('"');
                 if i < len {
@@ -634,7 +653,14 @@ fn opening_quote(chars: &[char], close: usize) -> Option<usize> {
 /// Insert `:` between a key and the next value when the colon is missing.
 /// `{a}` stays unchanged: there is no value. `{a hello world}` stays
 /// unchanged after the colon, because two words are still ambiguous.
-pub(crate) fn insert_missing_colons(s: &str) -> String {
+///
+/// A word glued to the closing quote of a finished string is not a new key.
+/// `{"cmd": "say "hi" now"}` and `{"cmd": "say "now: 1}` are
+/// [`RepairError::Ambiguous`], even when that word already has a colon.
+/// A quoted key that already has its colon, as in `{"a": "x" "b": 1}`, is
+/// still a missing comma. `{a: "x" b 1}` and `{a: "x" b: 1}` still repair,
+/// because a space separates the word from the quote.
+pub(crate) fn insert_missing_colons(s: &str) -> Result<String, RepairError> {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
     let mut out = String::with_capacity(s.len() + 8);
@@ -649,18 +675,27 @@ pub(crate) fn insert_missing_colons(s: &str) -> String {
         }
         if ch == '"' {
             let keyish = colon_keyish(&stack);
+            let after_string = string_value_finished(&stack);
             index = copy_quoted(&chars, index, &mut out);
+            if after_string && colon_needed(&chars, index) {
+                return Err(RepairError::Ambiguous(
+                    "unescaped quote in a string".to_string(),
+                ));
+            }
             if keyish && colon_needed(&chars, index) {
                 out.push(':');
                 set_colon_mode(&mut stack, ColonMode::Value);
             } else if !keyish {
-                finish_colon_value(&mut stack);
+                finish_colon_value(&mut stack, true);
             }
             continue;
         }
         if ch == '{' {
             out.push(ch);
-            stack.push(ColonNest::Object(ColonMode::Key));
+            stack.push(ColonNest::Object {
+                mode: ColonMode::Key,
+                value_was_string: false,
+            });
             index += 1;
             continue;
         }
@@ -673,7 +708,7 @@ pub(crate) fn insert_missing_colons(s: &str) -> String {
         if ch == '}' || ch == ']' {
             out.push(ch);
             stack.pop();
-            finish_colon_value(&mut stack);
+            finish_colon_value(&mut stack, false);
             index += 1;
             continue;
         }
@@ -690,15 +725,27 @@ pub(crate) fn insert_missing_colons(s: &str) -> String {
             continue;
         }
         if starts_bare_word(ch) || ch == '$' {
+            let start = index;
             let end = bare_word_end(&chars, index);
             let keyish = colon_keyish(&stack);
-            out.extend(chars[index..end].iter().copied());
+            let after_string = string_value_finished(&stack);
+            let glued_quote = start > 0 && chars[start - 1] == '"';
+            out.extend(chars[start..end].iter().copied());
             index = end;
+            // `{"a": "hello\n"b": 1}` stays unfixable: the quote after
+            // the glued word begins `":`, not more of the string.
+            let quote_then_colon =
+                chars.get(index) == Some(&'"') && chars.get(index + 1) == Some(&':');
+            if keyish && after_string && glued_quote && !quote_then_colon {
+                return Err(RepairError::Ambiguous(
+                    "unescaped quote in a string".to_string(),
+                ));
+            }
             if keyish && colon_needed(&chars, index) && !after_bare_phrase(&stack, &chars, index) {
                 out.push(':');
                 set_colon_mode(&mut stack, ColonMode::Value);
             } else if !keyish {
-                finish_colon_value(&mut stack);
+                finish_colon_value(&mut stack, false);
             }
             continue;
         }
@@ -711,19 +758,22 @@ pub(crate) fn insert_missing_colons(s: &str) -> String {
                 out.push(':');
                 set_colon_mode(&mut stack, ColonMode::Value);
             } else {
-                finish_colon_value(&mut stack);
+                finish_colon_value(&mut stack, false);
             }
             continue;
         }
         out.push(ch);
         index += 1;
     }
-    out
+    Ok(out)
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum ColonNest {
-    Object(ColonMode),
+    Object {
+        mode: ColonMode,
+        value_was_string: bool,
+    },
     Array,
 }
 
@@ -737,21 +787,38 @@ enum ColonMode {
 fn colon_keyish(stack: &[ColonNest]) -> bool {
     matches!(
         stack.last(),
-        Some(ColonNest::Object(ColonMode::Key | ColonMode::After))
+        Some(ColonNest::Object {
+            mode: ColonMode::Key | ColonMode::After,
+            ..
+        })
+    )
+}
+
+fn string_value_finished(stack: &[ColonNest]) -> bool {
+    matches!(
+        stack.last(),
+        Some(ColonNest::Object {
+            mode: ColonMode::After,
+            value_was_string: true,
+        })
     )
 }
 
 fn set_colon_mode(stack: &mut [ColonNest], mode: ColonMode) {
-    if let Some(ColonNest::Object(slot)) = stack.last_mut() {
+    if let Some(ColonNest::Object { mode: slot, .. }) = stack.last_mut() {
         *slot = mode;
     }
 }
 
-fn finish_colon_value(stack: &mut [ColonNest]) {
-    if let Some(ColonNest::Object(slot)) = stack.last_mut()
-        && *slot == ColonMode::Value
+fn finish_colon_value(stack: &mut [ColonNest], value_was_string: bool) {
+    if let Some(ColonNest::Object {
+        mode,
+        value_was_string: flag,
+    }) = stack.last_mut()
+        && *mode == ColonMode::Value
     {
-        *slot = ColonMode::After;
+        *mode = ColonMode::After;
+        *flag = value_was_string;
     }
 }
 
@@ -766,7 +833,13 @@ fn plain_integer_key(token: &str) -> bool {
 /// In `After` mode the previous value was already finished. Another bare
 /// word is the rest of a phrase (`fix the bug`), not a key (`b` before `2`).
 fn after_bare_phrase(stack: &[ColonNest], chars: &[char], index: usize) -> bool {
-    if !matches!(stack.last(), Some(ColonNest::Object(ColonMode::After))) {
+    if !matches!(
+        stack.last(),
+        Some(ColonNest::Object {
+            mode: ColonMode::After,
+            ..
+        })
+    ) {
         return false;
     }
     let mut next = index;

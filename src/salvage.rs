@@ -42,11 +42,14 @@ fn tail_is_comment(tail: &str) -> bool {
     }
 }
 
-/// Drop a fence info string such as `json` or `jsonc` when it is a tag.
+/// Drop a fence info string such as `json`, `jsonc`, or `json5` when it is a tag.
+///
+/// The tag may contain a digit. An unknown word that only starts with a
+/// known tag, such as `json5foo`, stays in the body.
 fn strip_fence_info(rest: &str) -> &str {
     let end = rest
         .char_indices()
-        .find(|(_, ch)| !ch.is_ascii_alphabetic())
+        .find(|(_, ch)| !ch.is_ascii_alphanumeric())
         .map(|(idx, _)| idx)
         .unwrap_or(rest.len());
     if end == 0 {

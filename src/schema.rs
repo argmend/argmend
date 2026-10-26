@@ -29,7 +29,11 @@ const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name
 /// `unevaluatedProperties: false` keeps a property that `allOf`, `anyOf`,
 /// `oneOf`, `if` / `then` / `else`, or a dependent schema evaluated.
 /// `additionalProperties: false` does not look inside those branches. A key
-/// one of them names is ambiguous instead of dropped.
+/// one of them names is ambiguous instead of dropped. A path alias does not
+/// rename a key one of those branches lists under `properties`. The same
+/// refusal applies when the object is open. An unresolved `$ref` or
+/// `$dynamicRef` on this object, or on one of those branches, blocks
+/// dropping a key. The ref is not resolved.
 pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError> {
     let (next, rewrites) = normalize_child(value, schema)?;
     Ok(Repaired {
@@ -1842,6 +1846,14 @@ fn normalize_object(
         }
         match alias_target(key, props)? {
             Some(target) => {
+                if PATH_KEYS.contains(&key.as_str())
+                    && PATH_KEYS.contains(&target)
+                    && applicator_names_property(schema, key)
+                {
+                    return Err(RepairError::Ambiguous(format!(
+                        "'{key}' is named by a schema branch and is also a path alias for '{target}'"
+                    )));
+                }
                 // The canonical key may already have been coerced into `out`.
                 // Compare both sides after the property schema, so `"1"` and
                 // `1` agree, and key order does not change the result.
@@ -1958,6 +1970,13 @@ fn normalized_alias_side(
     Ok(out.get(target).cloned())
 }
 
+/// Parent property this key renames to.
+///
+/// An `x-aliases` entry wins. A path key otherwise renames to the one parent
+/// property that is also a path key (`path`, `file`, `file_path`, `filepath`,
+/// `path_name`). [`normalize_object`] refuses that rename when an applicator
+/// `properties` map lists the incoming key. Parent `properties` are not that
+/// conflict.
 fn alias_target<'a>(
     key: &str,
     props: &'a Map<String, Value>,
@@ -1981,6 +2000,31 @@ fn alias_target<'a>(
             "'{key}' matches more than one property"
         ))),
     }
+}
+
+/// `true` when an applicator branch lists `key` under `properties`.
+/// This object's own `properties` map does not count.
+fn applicator_names_property(schema: &Value, key: &str) -> bool {
+    let mut mentioned = BTreeSet::new();
+    let schema = schema_view(schema);
+    let Some(map) = schema.as_object() else {
+        return false;
+    };
+    for keyword in ["allOf", "anyOf", "oneOf", "if", "then", "else"] {
+        match map.get(keyword) {
+            Some(Value::Array(branches)) => {
+                for branch in branches {
+                    mention_applicator(branch, &mut mentioned);
+                }
+            }
+            Some(child) => mention_applicator(child, &mut mentioned),
+            None => {}
+        }
+    }
+    for (_, sub) in dependent_object_schemas(schema) {
+        mention_applicator(sub, &mut mentioned);
+    }
+    mentioned.contains(key)
 }
 
 fn property_lists_alias(prop: &Value, key: &str) -> bool {
@@ -2071,6 +2115,9 @@ struct ApplicatorCoverage {
     /// An applied branch has `patternProperties`. The pattern is not matched
     /// here, so a remaining key may already have been evaluated.
     open_pattern: bool,
+    /// This object or an applicator branch contains `$ref` or `$dynamicRef`.
+    /// The ref is not resolved, so a remaining key may be named by it.
+    open_ref: bool,
 }
 
 fn applicator_coverage(
@@ -2082,11 +2129,53 @@ fn applicator_coverage(
     Ok(coverage)
 }
 
+/// Records `$ref` or `$dynamicRef` on this object or an applicator branch.
+/// Acceptance is not required. The ref is not resolved. `properties`,
+/// `$defs`, and `not` are not walked.
+fn note_unresolved_ref(schema: &Value, coverage: &mut ApplicatorCoverage) {
+    if coverage.open_ref {
+        return;
+    }
+    let Some(map) = schema.as_object() else {
+        return;
+    };
+    if map.contains_key("$ref") || map.contains_key("$dynamicRef") {
+        coverage.open_ref = true;
+        return;
+    }
+    for keyword in ["allOf", "anyOf", "oneOf", "if", "then", "else"] {
+        match map.get(keyword) {
+            Some(Value::Array(branches)) => {
+                for branch in branches {
+                    note_unresolved_ref(branch, coverage);
+                    if coverage.open_ref {
+                        return;
+                    }
+                }
+            }
+            Some(child) => {
+                note_unresolved_ref(child, coverage);
+                if coverage.open_ref {
+                    return;
+                }
+            }
+            None => {}
+        }
+    }
+    for (_, sub) in dependent_object_schemas(schema) {
+        note_unresolved_ref(sub, coverage);
+        if coverage.open_ref {
+            return;
+        }
+    }
+}
+
 fn collect_applicators(
     schema: &Value,
     instance: &Value,
     coverage: &mut ApplicatorCoverage,
 ) -> Result<(), RepairError> {
+    note_unresolved_ref(schema, coverage);
     let Some(map) = schema.as_object() else {
         return Ok(());
     };
@@ -2257,6 +2346,12 @@ fn refuse_covered_unknown(
         let key = &unknown[0].0;
         return Err(RepairError::Ambiguous(format!(
             "unknown key '{key}' may be evaluated by patternProperties"
+        )));
+    }
+    if coverage.open_ref && (additional || unevaluated) {
+        let key = &unknown[0].0;
+        return Err(RepairError::Ambiguous(format!(
+            "unknown key '{key}' may be evaluated by an unresolved ref"
         )));
     }
     Ok(())
@@ -2723,9 +2818,11 @@ fn record_constrained(text: &str, matched: &Value, schema: &Value, rewrites: &mu
     }
 }
 
+/// One leading `+` is unary plus. A second sign (`+-5`) is not a number
+/// token. `const` and `enum` use this parser and follow the same rule.
 fn integer_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
-    let text = text.strip_prefix('+').unwrap_or(&text);
+    let text = without_unary_plus(&text);
     if text.is_empty() || !is_integer_token(text) || has_leading_zero(text) {
         return None;
     }
@@ -2734,9 +2831,11 @@ fn integer_string(text: &str) -> Option<serde_json::Number> {
 }
 
 /// `"3.0"`, `"-2.000"`, and `"1."` are integers. `"3.10"` and `"03.0"` are not.
+/// One leading `+` is unary plus. A second sign (`+-2.0`) is not a number
+/// token. `const` and `enum` use this parser and follow the same rule.
 fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
-    let text = text.strip_prefix('+').unwrap_or(&text);
+    let text = without_unary_plus(&text);
     let (negative, rest) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text),
@@ -2758,9 +2857,11 @@ fn integer_from_zero_fraction(text: &str) -> Option<serde_json::Number> {
     Some(serde_json::Number::from(parsed))
 }
 
+/// One leading `+` is unary plus. A second sign (`+-1.5`, `+-1e2`) is not a
+/// number token. `const` and `enum` use this parser and follow the same rule.
 fn number_string(text: &str) -> Option<serde_json::Number> {
     let text = without_digit_underscores(text)?;
-    let text = text.strip_prefix('+').unwrap_or(&text);
+    let text = without_unary_plus(&text);
     if let Some(number) = integer_string(text) {
         return Some(number);
     }
@@ -2882,6 +2983,14 @@ fn has_leading_zero(text: &str) -> bool {
     let digits = mantissa.strip_prefix('-').unwrap_or(mantissa);
     let whole = digits.split('.').next().unwrap_or(digits);
     whole.len() > 1 && whole.starts_with('0')
+}
+
+/// `+5` loses the plus. `+-5`, `++5`, and a lone `+` stay as written.
+fn without_unary_plus(text: &str) -> &str {
+    match text.strip_prefix('+') {
+        Some(rest) if !rest.is_empty() && !rest.starts_with(['+', '-']) => rest,
+        _ => text,
+    }
 }
 
 fn is_integer_token(text: &str) -> bool {

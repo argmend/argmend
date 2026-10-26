@@ -428,10 +428,49 @@ fn dropped_allof_property(
         return None;
     }
     let named = allof_property_names(schema);
-    let dropped = before
+    if let Some(dropped) = before
         .keys()
-        .find(|key| !after.contains_key(*key) && named.contains(*key))?;
-    Some(format!("dropped '{dropped}' named by allOf"))
+        .find(|key| !after.contains_key(*key) && named.contains(*key))
+    {
+        return Some(format!("dropped '{dropped}' named by allOf"));
+    }
+    if schema_has_unresolved_ref(schema) {
+        let dropped = before.keys().find(|key| !after.contains_key(*key))?;
+        return Some(format!("dropped '{dropped}' near an unresolved ref"));
+    }
+    None
+}
+
+/// `$ref` or `$dynamicRef` on this object or an applicator branch.
+/// A ref that appears only inside unused `$defs` does not count.
+fn schema_has_unresolved_ref(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        return false;
+    };
+    if map.contains_key("$ref") || map.contains_key("$dynamicRef") {
+        return true;
+    }
+    for keyword in ["allOf", "anyOf", "oneOf", "if", "then", "else"] {
+        match map.get(keyword) {
+            Some(Value::Array(branches)) if branches.iter().any(schema_has_unresolved_ref) => {
+                return true;
+            }
+            Some(child) if schema_has_unresolved_ref(child) => return true,
+            _ => {}
+        }
+    }
+    for keyword in ["dependentSchemas", "dependencies"] {
+        let Some(deps) = map.get(keyword).and_then(Value::as_object) else {
+            continue;
+        };
+        if deps
+            .values()
+            .any(|sub| sub.is_object() && schema_has_unresolved_ref(sub))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn allof_property_names(schema: &Value) -> BTreeSet<String> {
@@ -735,6 +774,58 @@ fn sibling_ref_does_not_block_a_checkable_type() {
     assert!(err.to_string().contains("bounds"), "{err}");
     let repaired = normalize(&json!("2"), &bounded).expect("inside");
     assert_eq!(repaired.value, json!(2));
+}
+
+#[test]
+fn checker_flags_a_drop_beside_an_unresolved_ref() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "unevaluatedProperties": false,
+        "allOf": [{"$ref": "#/$defs/x"}]
+    });
+    let before = json!({"path": "a", "line": 3});
+    let after = json!({"path": "a"});
+    assert_eq!(
+        object_violation(
+            &schema,
+            before.as_object().expect("before"),
+            after.as_object().expect("after"),
+        )
+        .as_deref(),
+        Some("dropped 'line' near an unresolved ref")
+    );
+
+    let named = json!({
+        "unevaluatedProperties": false,
+        "allOf": [{
+            "properties": {"line": {"type": "integer"}},
+            "$ref": "#/$defs/x"
+        }]
+    });
+    assert_eq!(
+        object_violation(
+            &named,
+            before.as_object().expect("before"),
+            after.as_object().expect("after"),
+        )
+        .as_deref(),
+        Some("dropped 'line' named by allOf")
+    );
+
+    let defs_only = json!({
+        "properties": {"path": {"type": "string"}},
+        "unevaluatedProperties": false,
+        "$defs": {"x": {"$ref": "#/$defs/y"}}
+    });
+    assert_eq!(
+        object_violation(
+            &defs_only,
+            before.as_object().expect("before"),
+            after.as_object().expect("after"),
+        ),
+        None
+    );
 }
 
 #[test]

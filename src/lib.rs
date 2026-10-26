@@ -78,6 +78,7 @@ pub enum RepairError {
 /// Syntax repair only. Empty input and garbage stay [`RepairOutcome::Unfixable`].
 ///
 /// A repeated XML parameter name is [`RepairOutcome::Ambiguous`].
+/// An unescaped quote inside a string is Ambiguous too.
 pub fn repair_json(raw: &str) -> RepairOutcome {
     match salvage_value(raw) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
@@ -127,7 +128,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         }
     }
 
-    let staged = syntax::apply_stages(&body);
+    let staged = syntax::apply_stages(&body)?;
     let parse_error = match serde_json::from_str::<Value>(&staged.text) {
         Ok(value) => {
             prefix.extend(staged.repairs);
@@ -274,7 +275,8 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 /// A schema that is the JSON boolean `true` or `false` is not applied. A
 /// string is not parsed again when the schema asks for an object or an
 /// array. An unresolved `$ref` does not block a sibling keyword this crate
-/// can check. A checkable sibling, such as `maximum`, still applies.
+/// can check. A checkable sibling, such as `maximum`, still applies. A closed
+/// object does not drop a key an unresolved `$ref` or `$dynamicRef` might name.
 ///
 /// Blank input is `{}`, `[]`, or null, matching the schema type.
 ///
@@ -406,6 +408,34 @@ mod tests {
                 .iter()
                 .any(|item| item.kind == RewriteKind::Fence)
         );
+    }
+
+    #[test]
+    fn fence_with_json5_tag_unwraps() {
+        for raw in [
+            "```json5\n{\"a\": 1}\n```",
+            "```JSON5\n{\"a\": 1}\n```",
+            "```json\n{\"a\": 1}\n```",
+            "```jsonc\n{\"a\": 1}\n```",
+        ] {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value["a"], 1, "{raw:?}");
+                    assert!(
+                        repairs.iter().any(|item| {
+                            item.kind == RewriteKind::Fence
+                                && item.detail == "unwrapped markdown fence"
+                        }),
+                        "{raw:?}: {repairs:?}"
+                    );
+                }
+                other => panic!("{raw:?}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            repair_json("```json5foo\n{\"a\": 1}\n```"),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     #[test]
@@ -560,6 +590,122 @@ mod tests {
     }
 
     #[test]
+    fn unescaped_quote_inside_a_string_is_ambiguous() {
+        for raw in [
+            r#"{"cmd": "say "hi" now"}"#,
+            r#"{"a": "x", "b": "say "hi"", "c": 1}"#,
+            r#"{"cmd": "say "now: 1}"#,
+            r#"{"a": "x"b: 1}"#,
+            r#"{"a": "x"b : 1}"#,
+            r#"{"cmd": "say "hello world: 1}"#,
+        ] {
+            match repair_json(raw) {
+                RepairOutcome::Ambiguous(reason) => {
+                    assert_eq!(reason, "unescaped quote in a string");
+                }
+                other => panic!("{raw} -> {other:?}"),
+            }
+        }
+        match repair_json(r#"{"cmd": "say \"hi\" now"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["cmd"], "say \"hi\" now"),
+            other => panic!("escaped quote {other:?}"),
+        }
+        match repair_json(r#"{"a": "x" "b": 1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], 1);
+                assert_eq!(value.as_object().expect("object").len(), 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("missing comma {other:?}"),
+        }
+        match repair_json("{a: 1 \"b\" 2}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing colons")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs.iter().any(|item| item.detail.contains("bare keys")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("number then quoted key {other:?}"),
+        }
+        match repair_json("{a: 1, \"b\" 2}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["b"], 2);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing colons")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs.iter().any(|item| item.detail.contains("bare keys")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("comma then quoted key {other:?}"),
+        }
+        match repair_json(r#"{a: "x" b 1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing colons")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("spaced bare key {other:?}"),
+        }
+        match repair_json(r#"{a: "x" b: 1}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("spaced key with colon {other:?}"),
+        }
+        match repair_json("```json\n{\"cmd\": \"say \"hi\" now\"}\n```") {
+            RepairOutcome::Ambiguous(reason) => {
+                assert_eq!(reason, "unescaped quote in a string");
+            }
+            other => panic!("fenced {other:?}"),
+        }
+        let err = repair_args(&RepairRequest {
+            tool_name: "say",
+            raw: r#"{"cmd": "say "hi" now"}"#,
+            schema: None,
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "tool 'say': unescaped quote in a string");
+    }
+
+    #[test]
     fn duplicate_json_key_with_the_same_value_is_recorded() {
         match repair_json(r#"{"a":1,"a":1}"#) {
             RepairOutcome::Repaired { value, repairs } => {
@@ -675,6 +821,107 @@ mod tests {
                 .iter()
                 .any(|item| item.kind == RewriteKind::Alias)
         );
+    }
+
+    #[test]
+    fn path_alias_does_not_rename_a_branch_property() {
+        fn expect_conflict(schema: &Value, value: Value, key: &str, target: &str) {
+            let err = normalize(&value, schema).expect_err("alias conflict");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "'{key}' is named by a schema branch and is also a path alias for '{target}'"
+                )
+            );
+        }
+
+        let closed = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "additionalProperties": false,
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(&closed, json!({"mode": "r", "file": "a"}), "file", "path");
+
+        let unevaluated = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "unevaluatedProperties": false,
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(
+            &unevaluated,
+            json!({"mode": "r", "file": "a"}),
+            "file",
+            "path",
+        );
+
+        let open = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "path": {"type": "string"}
+            },
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(&open, json!({"file": "a"}), "file", "path");
+
+        let reverse = json!({
+            "type": "object",
+            "properties": {"file": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"path": {"type": "string"}}}]
+        });
+        expect_conflict(&reverse, json!({"path": "a.rs"}), "path", "file");
+
+        let file_path = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"file_path": {"type": "string"}}}]
+        });
+        expect_conflict(
+            &file_path,
+            json!({"file_path": "a.rs"}),
+            "file_path",
+            "path",
+        );
+
+        let plain = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false
+        });
+        let repaired = normalize(&json!({"file": "a.rs"}), &plain).expect("plain rename");
+        assert_eq!(repaired.value, json!({"path": "a.rs"}));
+
+        let line = json!({
+            "type": "object",
+            "properties": {"mode": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"properties": {"line": {"type": "integer"}}}]
+        });
+        let err = normalize(&json!({"mode": "r", "line": "3"}), &line).expect_err("line");
+        assert!(
+            err.to_string().contains("named by a schema branch")
+                && err.to_string().contains("additionalProperties"),
+            "{err}"
+        );
+
+        let both = json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "x-aliases": ["file"]}
+            },
+            "allOf": [{"properties": {"file": {"type": "string"}}}]
+        });
+        expect_conflict(&both, json!({"file": "a.rs"}), "file", "path");
     }
 
     #[test]
@@ -1402,6 +1649,49 @@ mod tests {
     }
 
     #[test]
+    fn single_quoted_apostrophe_stays_in_the_value() {
+        match repair_json(r"{'a': 'x', 'b': 'O'Reilly'}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "x");
+                assert_eq!(value["b"], "O'Reilly");
+                assert!(value.get("Reilly").is_none(), "{value}");
+                assert_eq!(value.as_object().expect("object").len(), 2);
+                assert!(
+                    !repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{"msg": 'don't'}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["msg"], "don't");
+                assert!(value.get("t").is_none(), "{value}");
+                assert_eq!(value.as_object().expect("object").len(), 1);
+                assert!(
+                    !repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r"{'a': 'abc', 'b': 'def'}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "abc");
+                assert_eq!(value["b"], "def");
+                assert!(repairs.iter().any(|item| {
+                    item.kind == RewriteKind::Syntax && item.detail.contains("single quotes")
+                }));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn python_literals_become_json_values() {
         match repair_json("{a: True, b: False, c: None, items: [True, None]}") {
             RepairOutcome::Repaired { value, .. } => {
@@ -1670,6 +1960,99 @@ mod tests {
         assert!(repaired.rewrites.is_empty());
         let repaired = normalize(&json!({"n": "+2"}), &schema).expect("plus");
         assert_eq!(repaired.value["n"], 2);
+    }
+
+    #[test]
+    fn second_sign_is_not_a_number_token() {
+        let integer = json!({"type": "integer"});
+        let number = json!({"type": "number"});
+        for raw in ["+-5", "+-2.0"] {
+            let value = serde_json::Value::String(raw.to_string());
+            let repaired = normalize(&value, &integer).expect(raw);
+            assert_eq!(repaired.value, value, "{raw}");
+            assert!(
+                repaired.rewrites.is_empty(),
+                "{raw} {:?}",
+                repaired.rewrites
+            );
+        }
+        for raw in ["+-1.5", "+-1e2"] {
+            let value = serde_json::Value::String(raw.to_string());
+            let repaired = normalize(&value, &number).expect(raw);
+            assert_eq!(repaired.value, value, "{raw}");
+            assert!(
+                repaired.rewrites.is_empty(),
+                "{raw} {:?}",
+                repaired.rewrites
+            );
+        }
+        let value = serde_json::Value::String("+-2".to_string());
+        let repaired = normalize(&value, &json!({"enum": [-2, 5]})).expect("enum");
+        assert_eq!(repaired.value, value);
+        assert!(repaired.rewrites.is_empty(), "{:?}", repaired.rewrites);
+        let repaired = normalize(&value, &json!({"const": -2})).expect("const");
+        assert_eq!(repaired.value, value);
+        assert!(repaired.rewrites.is_empty(), "{:?}", repaired.rewrites);
+
+        let repaired = normalize(&json!("+5"), &integer).expect("+5");
+        assert_eq!(repaired.value, 5);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string +5"),
+            "{:?}",
+            repaired.rewrites
+        );
+        let repaired = normalize(&json!("-5"), &integer).expect("-5");
+        assert_eq!(repaired.value, -5);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string -5")
+        );
+        let repaired = normalize(&json!("+2.0"), &integer).expect("+2.0");
+        assert_eq!(repaired.value, 2);
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "integer string +2.0")
+        );
+        let repaired = normalize(&json!("-2.0"), &integer).expect("-2.0");
+        assert_eq!(repaired.value, -2);
+        let repaired = normalize(&json!("+1.5"), &number).expect("+1.5");
+        assert_eq!(repaired.value.as_f64(), Some(1.5));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "number string +1.5")
+        );
+        let repaired = normalize(&json!("+1e2"), &number).expect("+1e2");
+        assert_eq!(repaired.value.as_f64(), Some(100.0));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.detail == "number string +1e2")
+        );
+        for raw in ["++5", "-+5", "--5"] {
+            let value = serde_json::Value::String(raw.to_string());
+            let repaired = normalize(&value, &integer).expect(raw);
+            assert_eq!(repaired.value, value, "{raw}");
+            assert!(repaired.rewrites.is_empty(), "{raw}");
+        }
+        match repair_json(r#"{"a": +-5}"#) {
+            RepairOutcome::Unfixable(reason) => {
+                assert!(
+                    reason.contains("parse failed after all repairs"),
+                    "{reason}"
+                );
+            }
+            other => panic!("bare +-5 {other:?}"),
+        }
     }
 
     #[test]
@@ -2119,6 +2502,130 @@ mod tests {
         });
         let repaired = normalize(&json!(["1", "2"]), &items).expect("items");
         assert_eq!(repaired.value, json!([1, 2]));
+    }
+
+    #[test]
+    fn unresolved_ref_blocks_an_unknown_key_drop() {
+        fn expect_ref(schema: &Value) {
+            let err =
+                normalize(&json!({"path": "a", "line": 3}), schema).expect_err("unresolved ref");
+            assert_eq!(
+                err.to_string(),
+                "unknown key 'line' may be evaluated by an unresolved ref"
+            );
+        }
+
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "anyOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "$ref": "#/$defs/x"
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{"$dynamicRef": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": false,
+            "allOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "oneOf": [{"$ref": "#/$defs/x"}]
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "if": {"$ref": "#/$defs/x"}
+        }));
+        expect_ref(&json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "dependentSchemas": {"mode": {"$ref": "#/$defs/x"}}
+        }));
+
+        let kept = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{
+                "properties": {"line": {"type": "integer"}},
+                "$ref": "#/$defs/x"
+            }]
+        });
+        let repaired = normalize(&json!({"path": "a", "line": 3}), &kept).expect("evaluated");
+        assert_eq!(repaired.value, json!({"path": "a", "line": 3}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .all(|item| item.kind != RewriteKind::DroppedUnknown)
+        );
+        let err = normalize(&json!({"path": "a", "line": 3, "note": 1}), &kept).expect_err("other");
+        assert_eq!(
+            err.to_string(),
+            "unknown key 'note' may be evaluated by an unresolved ref"
+        );
+
+        let defs_only = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "$defs": {"x": {"$ref": "#/$defs/y"}}
+        });
+        let repaired = normalize(&json!({"path": "a", "line": 3}), &defs_only).expect("defs");
+        assert_eq!(repaired.value, json!({"path": "a"}));
+        assert!(
+            repaired
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::DroppedUnknown)
+        );
+
+        let inside_property = json!({
+            "type": "object",
+            "properties": {"path": {"$ref": "#/$defs/x"}},
+            "unevaluatedProperties": false
+        });
+        let repaired =
+            normalize(&json!({"path": "a", "line": 3}), &inside_property).expect("property ref");
+        assert_eq!(repaired.value, json!({"path": "a"}));
+
+        let patterned = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "unevaluatedProperties": false,
+            "allOf": [{
+                "properties": {"line": {"type": "integer"}},
+                "patternProperties": {"^x-": {"type": "string"}},
+                "$ref": "#/$defs/x"
+            }]
+        });
+        let err = normalize(&json!({"path": "a", "note": "hi"}), &patterned).expect_err("pattern");
+        assert!(
+            err.to_string().contains("evaluated by patternProperties"),
+            "{err}"
+        );
     }
 
     #[test]
