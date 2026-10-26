@@ -2241,6 +2241,76 @@ mod tests {
     }
 
     #[test]
+    fn large_integer_bounds_use_the_full_integer() {
+        fn parsed(text: &str) -> Value {
+            serde_json::from_str(text).expect(text)
+        }
+        fn assert_bounds(value: &str, schema: &str) {
+            let err =
+                normalize(&Value::String(value.to_string()), &parsed(schema)).expect_err(value);
+            assert_eq!(
+                err,
+                RepairError::Ambiguous("coerced value is outside the schema bounds".to_string()),
+                "{value} against {schema}"
+            );
+        }
+        fn assert_excluded(value: &str, schema: &str) {
+            let err =
+                normalize(&Value::String(value.to_string()), &parsed(schema)).expect_err(value);
+            assert_eq!(
+                err,
+                RepairError::Ambiguous("coerced value is excluded by not".to_string()),
+                "{value} against {schema}"
+            );
+        }
+        fn assert_number(value: &str, schema: &str) {
+            let repaired =
+                normalize(&Value::String(value.to_string()), &parsed(schema)).expect(value);
+            assert_eq!(repaired.value, parsed(value), "{value} against {schema}");
+        }
+
+        assert_bounds(
+            "9223372036854775807",
+            r#"{"type":"integer","minimum":9223372036854775808}"#,
+        );
+        assert_bounds(
+            "9007199254740993",
+            r#"{"type":"integer","minimum":9223372036854777856}"#,
+        );
+        assert_bounds(
+            "18446744073709551615",
+            r#"{"type":"integer","minimum":18446744073709551616}"#,
+        );
+        assert_number(
+            "9223372036854775807",
+            r#"{"type":"integer","exclusiveMaximum":9223372036854775808}"#,
+        );
+        assert_excluded(
+            "5",
+            r#"{"type":"integer","not":{"maximum":9223372036854775808}}"#,
+        );
+        assert_excluded(
+            "9223372036854775808",
+            r#"{"type":"integer","not":{"minimum":9223372036854775808}}"#,
+        );
+
+        assert_number(
+            "9223372036854775808",
+            r#"{"type":"integer","minimum":9223372036854775808}"#,
+        );
+        assert_bounds(
+            "9223372036854775808",
+            r#"{"type":"integer","minimum":9223372036854777856}"#,
+        );
+        assert_number(
+            "18446744073709551615",
+            r#"{"type":"integer","maximum":18446744073709551616}"#,
+        );
+        assert_number("5", r#"{"type":"integer","maximum":10}"#);
+        assert_bounds("11", r#"{"type":"integer","maximum":10}"#);
+    }
+
+    #[test]
     fn dependent_schema_applies_when_the_property_is_present() {
         let schema = json!({
             "dependentSchemas": {

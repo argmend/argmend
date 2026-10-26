@@ -610,7 +610,11 @@ fn i64_against_schema_bounds(schema: &Value, int: i64) -> Option<bool> {
         if bound.is_boolean() {
             continue;
         }
-        if schema_i64_limit(schema, key).is_none() && comparable_f64_bound(bound).is_none() {
+        if schema_i64_limit(schema, key).is_none()
+            && bound.as_u64().is_none()
+            && !finite_above_every_u64(bound)
+            && comparable_f64_bound(bound).is_none()
+        {
             return None;
         }
     }
@@ -649,6 +653,10 @@ fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) 
     }
     let order = if let Some(limit) = schema_i64_limit(schema, key) {
         int.cmp(&limit)
+    } else if let Some(limit) = bound.as_u64() {
+        cmp_i64_u64(int, limit)
+    } else if finite_above_every_u64(bound) {
+        Ordering::Less
     } else if let Some(limit) = comparable_f64_bound(bound) {
         cmp_i64_f64(int, limit)
     } else {
@@ -665,6 +673,16 @@ fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) 
     } else {
         order.is_gt()
     }
+}
+
+fn cmp_i64_u64(int: i64, limit: u64) -> Ordering {
+    u64::try_from(int).map_or(Ordering::Less, |int| int.cmp(&limit))
+}
+
+fn finite_above_every_u64(bound: &Value) -> bool {
+    bound
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number >= u64::MAX as f64)
 }
 
 fn cmp_i64_f64(int: i64, limit: f64) -> Ordering {
@@ -687,6 +705,7 @@ fn u64_against_schema_bounds(schema: &Value, int: u64) -> Option<bool> {
         }
         if bound.as_i64().is_none()
             && bound.as_u64().is_none()
+            && !finite_above_every_u64(bound)
             && comparable_f64_bound(bound).is_none()
         {
             return None;
@@ -743,6 +762,9 @@ fn cmp_u64_bound(int: u64, bound: &Value) -> Option<Ordering> {
     if let Some(limit) = bound.as_u64() {
         return Some(int.cmp(&limit));
     }
+    if finite_above_every_u64(bound) {
+        return Some(Ordering::Less);
+    }
     let limit = comparable_f64_bound(bound)?;
     Some(cmp_u64_f64(int, limit))
 }
@@ -766,8 +788,13 @@ fn schema_i64_limit(schema: &Value, key: &str) -> Option<i64> {
         return Some(int);
     }
     let number = value.as_f64()?;
-    if number.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(&number) {
-        Some(number as i64)
+    // `i64::MAX as f64` is 2^63. Casting that f64 to i64 saturates at i64::MAX.
+    if !number.is_finite() || number >= i64::MAX as f64 {
+        return None;
+    }
+    let int = number as i64;
+    if int as f64 == number {
+        Some(int)
     } else {
         None
     }
@@ -863,7 +890,10 @@ fn checkable_bound(schema: &Value) -> bool {
 }
 
 fn checkable_number(bound: &Value) -> bool {
-    bound.as_i64().is_some() || comparable_f64_bound(bound).is_some()
+    bound.as_i64().is_some()
+        || bound.as_u64().is_some()
+        || comparable_f64_bound(bound).is_some()
+        || finite_above_every_u64(bound)
 }
 
 fn checkable_multiple(schema: &Value) -> bool {
