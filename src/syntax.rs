@@ -489,6 +489,11 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
             }
             // Convert single-quoted string to double-quoted string.
             '\'' => {
+                if i > 0 && chars[i - 1].is_alphanumeric() {
+                    out.push('\'');
+                    i += 1;
+                    continue;
+                }
                 out.push('"');
                 i += 1;
                 // A `'` that ends the value still closes it, and end of
@@ -939,7 +944,9 @@ pub(crate) fn quote_bare_keys(s: &str) -> String {
                 let mut hyphenated = i;
                 loop {
                     if hyphenated + 1 < len
-                        && (chars[hyphenated] == '-' || chars[hyphenated] == '.')
+                        && (chars[hyphenated] == '-'
+                            || chars[hyphenated] == '.'
+                            || chars[hyphenated] == '\'')
                         && (chars[hyphenated + 1].is_alphanumeric() || chars[hyphenated + 1] == '_')
                     {
                         hyphenated += 1;
@@ -1758,7 +1765,7 @@ fn bare_word_end(chars: &[char], start: usize) -> usize {
     }
     loop {
         if index + 1 < len
-            && (chars[index] == '-' || chars[index] == '.')
+            && (chars[index] == '-' || chars[index] == '.' || chars[index] == '\'')
             && (chars[index + 1].is_alphanumeric() || chars[index + 1] == '_')
         {
             index += 1;
@@ -2223,6 +2230,11 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                 }
             }
             '\'' => {
+                if i > 0 && chars[i - 1].is_alphanumeric() {
+                    out.push('\'');
+                    i += 1;
+                    continue;
+                }
                 out.push('\'');
                 i += 1;
                 while i < len {
@@ -3465,6 +3477,34 @@ mod tests {
         match repair_tool_call_json("{'msg': 'don't // keep'}") {
             RepairOutcome::Repaired { value, .. } => {
                 assert_eq!(value["msg"], "don't // keep");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_word_keeps_an_internal_apostrophe() {
+        match repair_tool_call_json("{author: O'Reilly}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["author"], "O'Reilly");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{msg: don't}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["msg"], "don't");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{O'Reilly: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["O'Reilly"], 1);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{'author': 'O'Reilly'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["author"], "O'Reilly");
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
