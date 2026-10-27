@@ -79,6 +79,7 @@ pub enum RepairError {
 ///
 /// A repeated XML parameter name is [`RepairOutcome::Ambiguous`].
 /// An unescaped quote inside a string is Ambiguous too.
+/// A Windows path keeps its backslashes. An unquoted drive path is one string.
 pub fn repair_json(raw: &str) -> RepairOutcome {
     match salvage_value(raw) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
@@ -103,12 +104,17 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         }
         None => raw,
     };
-    if let Ok(value) = serde_json::from_str(raw) {
-        return with_unique_keys(raw, value, prefix);
+    // `{"path":"C:\temp"}` is valid JSON and the value contains a tab.
+    // Restore the path backslash before that parse counts as Valid.
+    let passed = syntax::pass_string_backslashes(raw);
+    prefix.extend(passed.repairs);
+    let current = passed.text;
+    if let Ok(value) = serde_json::from_str(&current) {
+        return with_unique_keys(&current, value, prefix);
     }
 
-    let mut body = raw.to_string();
-    if let Some(inner) = salvage::unwrap_fence(raw) {
+    let mut body = current.clone();
+    if let Some(inner) = salvage::unwrap_fence(&current) {
         prefix.push(note(RewriteKind::Fence, "unwrapped markdown fence"));
         body = inner;
         if let Ok(value) = serde_json::from_str(&body) {
@@ -117,7 +123,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
     }
 
     if prefix.is_empty() {
-        match syntax::repair_tool_call_json(raw) {
+        match syntax::repair_tool_call_json(&current) {
             RepairOutcome::Valid(value) => return Ok((value, prefix)),
             RepairOutcome::Repaired { value, repairs } => {
                 prefix.extend(repairs);
@@ -2091,6 +2097,256 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn windows_path_backslashes_stay_in_the_string() {
+        fn one_path(raw: &str, key: &str, expected: &str) {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value[key], expected, "{raw}");
+                    assert!(
+                        repairs.iter().any(|item| {
+                            item.detail.contains("windows path")
+                                || item.detail.contains("bare paths")
+                                || item.detail.contains("invalid escape")
+                        }),
+                        "{raw} {repairs:?}"
+                    );
+                    let again = serde_json::to_string(&value).expect("serialize");
+                    match repair_json(&again) {
+                        RepairOutcome::Valid(stable) => assert_eq!(stable[key], expected, "{raw}"),
+                        other => panic!("second pass of {raw:?} via {again} -> {other:?}"),
+                    }
+                }
+                other => panic!("{raw:?} -> {other:?}"),
+            }
+        }
+
+        one_path(
+            r#"{"path": "C:\Users\sebta\a.rs"}"#,
+            "path",
+            "C:\\Users\\sebta\\a.rs",
+        );
+        one_path(
+            r#"{"path": "C:\Program Files\a.rs"}"#,
+            "path",
+            "C:\\Program Files\\a.rs",
+        );
+        one_path(
+            r#"{path: 'C:\Users\sebta\a.rs'}"#,
+            "path",
+            "C:\\Users\\sebta\\a.rs",
+        );
+        one_path(r#"{"path": "C:\temp"}"#, "path", "C:\\temp");
+        one_path(r#"{"path": "C:\bin"}"#, "path", "C:\\bin");
+        one_path(r#"{"path": "C:\new"}"#, "path", "C:\\new");
+        one_path(r#"{"path": "C:\form"}"#, "path", "C:\\form");
+        one_path(r#"{"path": "C:\return"}"#, "path", "C:\\return");
+        one_path(r#"{path: 'C:\temp'}"#, "path", "C:\\temp");
+        one_path(r#"{"path": "C:\users\sebta"}"#, "path", "C:\\users\\sebta");
+        one_path(
+            r#"{"path": "C:\temp\new\bin\form\return"}"#,
+            "path",
+            "C:\\temp\\new\\bin\\form\\return",
+        );
+        one_path(r#"{"path": "C:\Users\"}"#, "path", "C:\\Users\\");
+        one_path(r#"{path: 'C:\Users\'}"#, "path", "C:\\Users\\");
+        one_path(
+            r#"{"path": "\\server\share\a.rs"}"#,
+            "path",
+            "\\\\server\\share\\a.rs",
+        );
+        one_path(r#"{"a": "hello\world"}"#, "a", "hello\\world");
+        one_path("```json\n{\"path\": \"C:\\temp\"}\n```", "path", "C:\\temp");
+
+        match repair_json(r#"{"msg": "a\nb", "path": "C:\temp"}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["msg"], "a\nb");
+                assert_eq!(value["path"], "C:\\temp");
+            }
+            other => panic!("mixed string -> {other:?}"),
+        }
+        match repair_json(r#"{"path": "C:\\Users\\sebta\\a.rs"}"#) {
+            RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\sebta\\a.rs");
+            }
+            other => panic!("already escaped -> {other:?}"),
+        }
+        match repair_json(r#"{"path": "C:/Users/sebta/a.rs"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["path"], "C:/Users/sebta/a.rs"),
+            other => panic!("forward slash -> {other:?}"),
+        }
+        match repair_json(r#"{"msg": "a\tb"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["msg"], "a\tb"),
+            other => panic!("real tab -> {other:?}"),
+        }
+        match repair_json(r#"{"msg": "line\nbreak"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["msg"], "line\nbreak"),
+            other => panic!("real newline -> {other:?}"),
+        }
+        match repair_json(r#"{"a": "\u0041"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["a"], "A"),
+            other => panic!("unicode escape -> {other:?}"),
+        }
+        match repair_json(r#"{"a": "\""}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["a"], "\""),
+            other => panic!("escaped quote -> {other:?}"),
+        }
+        match repair_json(r#"{"note": "C: done\""}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["note"], "C: done\""),
+            other => panic!("sentence with an escaped quote -> {other:?}"),
+        }
+        match repair_json(r#"{"path": "C:\\dir\", more"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["path"], "C:\\dir\", more"),
+            other => panic!("quote inside a path -> {other:?}"),
+        }
+        match repair_json(r#"{"path": "C:\\Users\"} more"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["path"], "C:\\Users\"} more"),
+            other => panic!("brace inside a path -> {other:?}"),
+        }
+        match repair_json(r#"{"path": "C:\\Users\\"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["path"], "C:\\Users\\"),
+            other => panic!("already escaped trailing separator -> {other:?}"),
+        }
+        match repair_json(r#"{"path": "C:\Users\", "line": 1}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\Users\\");
+                assert_eq!(value["line"], 1);
+            }
+            other => panic!("trailing separator before the next key -> {other:?}"),
+        }
+        match syntax::repair_tool_call_json(r#"{"path": "C:\temp"}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["path"], "C:\\temp");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("windows path"))
+                );
+            }
+            other => panic!("syntax entry -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unquoted_drive_path_is_one_value() {
+        fn one_path(raw: &str, key: &str, expected: &str) {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value[key], expected, "{raw} {value}");
+                    assert!(
+                        repairs
+                            .iter()
+                            .any(|item| item.detail.contains("bare paths")),
+                        "{raw} {repairs:?}"
+                    );
+                    let again = serde_json::to_string(&value).expect("serialize");
+                    match repair_json(&again) {
+                        RepairOutcome::Valid(stable) => assert_eq!(stable[key], expected),
+                        other => panic!("second pass of {raw:?} -> {other:?}"),
+                    }
+                }
+                other => panic!("{raw:?} -> {other:?}"),
+            }
+        }
+
+        one_path("{path: C:/Users/sebta/a.rs}", "path", "C:/Users/sebta/a.rs");
+        one_path(
+            r"{path: C:\Users\sebta\a.rs}",
+            "path",
+            "C:\\Users\\sebta\\a.rs",
+        );
+        one_path(
+            r"{path: c:\Program Files\a.rs}",
+            "path",
+            "c:\\Program Files\\a.rs",
+        );
+        one_path(
+            "{path: C:/Users/sebta/a.rs, line: 3}",
+            "path",
+            "C:/Users/sebta/a.rs",
+        );
+        match repair_json("{path: C:/Users/sebta/a.rs, line: 3}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["line"], 3),
+            other => panic!("sibling number -> {other:?}"),
+        }
+        one_path("{path=C:/a.rs}", "path", "C:/a.rs");
+        one_path("{path=>C:/a.rs}", "path", "C:/a.rs");
+        one_path("{file: C:/a.rs}", "file", "C:/a.rs");
+        match repair_json("{cmd: {file: C:/a.rs}}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["cmd"]["file"], "C:/a.rs"),
+            other => panic!("nested -> {other:?}"),
+        }
+        match repair_json(r"[C:/a.rs, D:\b.rs]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value[0], "C:/a.rs");
+                assert_eq!(value[1], "D:\\b.rs");
+            }
+            other => panic!("array -> {other:?}"),
+        }
+        one_path(
+            r"{path: \\server\share\a.rs}",
+            "path",
+            "\\\\server\\share\\a.rs",
+        );
+        one_path("{url: http://example.com/a}", "url", "http://example.com/a");
+        one_path(
+            "{url: https://localhost:8080/a?x=1}",
+            "url",
+            "https://localhost:8080/a?x=1",
+        );
+        one_path(
+            "{file: file:///C:/Users/a.rs}",
+            "file",
+            "file:///C:/Users/a.rs",
+        );
+        match repair_json("{path: C:/foo bar: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:/foo");
+                assert_eq!(value["bar"], 1);
+            }
+            other => panic!("path stops before the next key -> {other:?}"),
+        }
+        match repair_json("{a: 1}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs.iter().all(
+                        |item| !item.detail.contains("path") && !item.detail.contains("escape")
+                    )
+                );
+            }
+            other => panic!("number -> {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{a: C}"),
+            RepairOutcome::Repaired { .. }
+        ));
+        match repair_json("{a: C}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "C"),
+            other => panic!("bare letter -> {other:?}"),
+        }
+        one_path("{path: C://Users/a.rs}", "path", "C://Users/a.rs");
+        one_path(
+            "{url: http://example.com/a} // tail",
+            "url",
+            "http://example.com/a",
+        );
+        match repair_json("{url: http://example.com/a} // tail") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert!(!value.to_string().contains("tail"), "{value}");
+            }
+            other => panic!("url comment -> {other:?}"),
+        }
+        match repair_json("{a: 1 // note\n}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("comment after a colon -> {other:?}"),
+        }
+        assert!(
+            matches!(repair_json("{a://note}"), RepairOutcome::Unfixable(_)),
+            "a key colon and // is still a comment"
+        );
     }
 
     #[test]

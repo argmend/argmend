@@ -729,6 +729,41 @@ fn arb_any_json() -> impl Strategy<Value = Value> {
     })
 }
 
+/// A repaired valid document may only turn a Windows path's short
+/// escapes back into backslashes.
+fn path_backslash_only(before: &Value, after: &Value) -> bool {
+    match (before, after) {
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(item, other)| path_backslash_only(item, other))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .get(key)
+                        .is_some_and(|other| path_backslash_only(value, other))
+                })
+        }
+        (Value::String(left), Value::String(right)) => {
+            left == right || looks_like_windows_path(right)
+        }
+        _ => before == after,
+    }
+}
+
+fn looks_like_windows_path(text: &str) -> bool {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next(), chars.next()) {
+        (Some(letter), Some(':'), Some('\\' | '/')) if letter.is_ascii_alphabetic() => true,
+        (Some('\\'), Some('\\'), _) => true,
+        _ => false,
+    }
+}
+
 fn panic_schema(index: u8) -> Value {
     match index % 3 {
         0 => json!({"type": "object", "properties": {"n": {"type": "integer"}}}),
@@ -950,6 +985,24 @@ proptest! {
         for raw in [text.clone(), format!("\n{text}"), format!(" {text} ")] {
             match repair_json(&raw) {
                 RepairOutcome::Valid(parsed) => prop_assert_eq!(parsed, value.clone()),
+                RepairOutcome::Repaired { value: repaired, repairs } => {
+                    prop_assert_ne!(&repaired, &value);
+                    prop_assert!(
+                        repairs
+                            .iter()
+                            .any(|item| item.detail.contains("windows path")),
+                        "{raw:?} {repairs:?}"
+                    );
+                    prop_assert!(
+                        path_backslash_only(&value, &repaired),
+                        "before={value} after={repaired}"
+                    );
+                    let again = serde_json::to_string(&repaired).expect("serialize");
+                    match repair_json(&again) {
+                        RepairOutcome::Valid(stable) => prop_assert_eq!(stable, repaired),
+                        other => prop_assert!(false, "{again:?} -> {other:?}"),
+                    }
+                }
                 other => prop_assert!(false, "{raw:?} -> {other:?}"),
             }
         }

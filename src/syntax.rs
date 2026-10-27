@@ -1,4 +1,5 @@
-//! Syntax stages for tool-argument JSON. Valid JSON is not rewritten.
+//! Syntax stages for tool-argument JSON. Valid JSON is not rewritten,
+//! except a Windows path whose backslash was read as a JSON escape.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,26 +18,29 @@ use super::{RepairError, RepairOutcome, Rewrite, RewriteKind};
 ///    boundary. An unclosed `/*` stays. A mark glued to a bare word stays.
 /// 3. Replace single quotes with double quotes.
 /// 4. Replace curly double quotes that wrap a token.
-/// 5. Escape raw controls inside strings.
-/// 6. Strip a unary `+` before a number.
-/// 7. Strip `_` between digits in a number, not inside a name.
-/// 8. Replace hexadecimal numbers.
-/// 9. Replace binary and octal numbers.
-/// 10. Fill a trailing decimal dot on a number (`1.` becomes `1.0`).
-/// 11. Replace Python triple quotes.
-/// 12. Replace unicode whitespace between tokens.
-/// 13. Replace `=` and `=>` between a key and a value.
-/// 14. Insert a missing colon. A later word in a bare phrase is not a new key.
+/// 5. Keep a Windows-path backslash, and keep a backslash JSON does not
+///    treat as an escape.
+/// 6. Escape raw controls inside strings.
+/// 7. Strip a unary `+` before a number.
+/// 8. Strip `_` between digits in a number, not inside a name.
+/// 9. Replace hexadecimal numbers.
+/// 10. Replace binary and octal numbers.
+/// 11. Fill a trailing decimal dot on a number (`1.` becomes `1.0`).
+/// 12. Replace Python triple quotes.
+/// 13. Replace unicode whitespace between tokens.
+/// 14. Replace `=` and `=>` between a key and a value.
+/// 15. Quote an unquoted drive path or `scheme://` value.
+/// 16. Insert a missing colon. A later word in a bare phrase is not a new key.
 ///     An unescaped quote after a finished string value is ambiguous.
-/// 15. Quote bare keys.
-/// 16. Replace Python `True`, `False`, and `None`.
-/// 17. Quote one bare value word. A word cut off at end of input stays bare.
-/// 18. Insert missing commas.
-/// 19. Collapse repeated commas.
-/// 20. Drop a leading comma.
-/// 21. Remove trailing commas.
-/// 22. Remove one trailing semicolon.
-/// 23. Unwrap outer parentheses.
+/// 17. Quote bare keys.
+/// 18. Replace Python `True`, `False`, and `None`.
+/// 19. Quote one bare value word. A word cut off at end of input stays bare.
+/// 20. Insert missing commas.
+/// 21. Collapse repeated commas.
+/// 22. Drop a leading comma.
+/// 23. Remove trailing commas.
+/// 24. Remove one trailing semicolon.
+/// 25. Unwrap outer parentheses.
 pub(crate) struct Staged {
     pub text: String,
     pub repairs: Vec<Rewrite>,
@@ -76,6 +80,12 @@ pub(crate) fn apply_stages(raw: &str) -> Result<Staged, RepairError> {
     if cleaned != text {
         repairs.push(syntax_note("replaced curly quotes"));
         text = cleaned;
+    }
+
+    let passed = pass_string_backslashes(&text);
+    if passed.text != text {
+        repairs.extend(passed.repairs);
+        text = passed.text;
     }
 
     let cleaned = escape_controls_in_strings(&text);
@@ -131,6 +141,14 @@ pub(crate) fn apply_stages(raw: &str) -> Result<Staged, RepairError> {
     let cleaned = replace_key_equals(&text);
     if cleaned != text {
         repairs.push(syntax_note("replaced key equals"));
+        text = cleaned;
+    }
+
+    // After `=` becomes `:`, so `{path=C:/a.rs}` and `{path=>C:/a.rs}`
+    // are values. An `=` inside `http://host?a=1` is not a key separator.
+    let cleaned = quote_unquoted_paths(&text);
+    if cleaned != text {
+        repairs.push(syntax_note("quoted bare paths"));
         text = cleaned;
     }
 
@@ -198,16 +216,19 @@ pub(crate) fn apply_stages(raw: &str) -> Result<Staged, RepairError> {
 }
 
 pub(crate) fn repair_tool_call_json(raw: &str) -> RepairOutcome {
-    if let Ok(value) = serde_json::from_str(raw) {
-        return outcome_with_unique_keys(raw, value, Vec::new());
+    let passed = pass_string_backslashes(raw);
+    if let Ok(value) = serde_json::from_str(&passed.text) {
+        return outcome_with_unique_keys(&passed.text, value, passed.repairs);
     }
-    let staged = match apply_stages(raw) {
+    let staged = match apply_stages(&passed.text) {
         Ok(staged) => staged,
         Err(RepairError::Ambiguous(reason)) => return RepairOutcome::Ambiguous(reason),
         Err(RepairError::Unfixable(reason)) => return RepairOutcome::Unfixable(reason),
     };
+    let mut repairs = passed.repairs;
+    repairs.extend(staged.repairs);
     match serde_json::from_str(&staged.text) {
-        Ok(value) => outcome_with_unique_keys(&staged.text, value, staged.repairs),
+        Ok(value) => outcome_with_unique_keys(&staged.text, value, repairs),
         Err(e) => RepairOutcome::Unfixable(format!("parse failed after all repairs: {e}")),
     }
 }
@@ -532,10 +553,12 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                     continue;
                 }
                 out.push('"');
+                let body_start = out.len();
                 i += 1;
                 // A `'` that ends the value still closes it, and end of
                 // input does not. `\'` is an apostrophe, not a closer, and
                 // an unescaped `'` before a letter or digit stays in the value.
+                // A path that ends in `\'` before `}` keeps that backslash.
                 let mut closed = false;
                 while i < len {
                     if chars[i] == '\\' {
@@ -543,8 +566,17 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                         if i < len {
                             // `\'` is an apostrophe. Copied through, it is
                             // not a legal JSON escape, so the backslash stays
-                            // off.
+                            // off. A drive path uses that backslash as the
+                            // separator before the closing quote.
                             if chars[i] == '\'' {
+                                if str_could_be_path_prefix(&out[body_start..])
+                                    && structural_after(&chars, i + 1)
+                                {
+                                    out.push('\\');
+                                    out.push('\\');
+                                    closed = true;
+                                    break;
+                                }
                                 out.push('\'');
                             } else {
                                 out.push('\\');
@@ -1219,6 +1251,481 @@ pub(crate) fn escape_controls_in_strings(s: &str) -> String {
     out
 }
 
+pub(crate) struct BackslashPass {
+    pub text: String,
+    pub repairs: Vec<Rewrite>,
+}
+
+/// Keep a backslash that a Windows path wrote as a JSON escape.
+///
+/// `C:\temp` is the six characters `C:\temp`. `\n` in a string that is
+/// not a path stays a newline. A `\\` pair stays one backslash. An
+/// escape JSON does not recognize, such as `\U`, stays a backslash.
+pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
+    if !raw.contains('\\') {
+        return BackslashPass {
+            text: raw.to_string(),
+            repairs: Vec::new(),
+        };
+    }
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len() + 8);
+    let mut index = 0;
+    let mut kept_path = false;
+    let mut kept_invalid = false;
+    while index < chars.len() {
+        if chars[index] != '"' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let (end, body) = take_string_body(&chars, index);
+        let rewritten = rewrite_string_body(&body);
+        let original: String = body.iter().collect();
+        if rewritten != original {
+            if is_drive_path_body(&body) || is_unc_literal(&body) {
+                kept_path = true;
+            } else {
+                kept_invalid = true;
+            }
+        }
+        out.push('"');
+        out.push_str(&rewritten);
+        if end < chars.len() && chars[end] == '"' {
+            out.push('"');
+            index = end + 1;
+        } else {
+            index = end;
+        }
+    }
+    let mut repairs = Vec::new();
+    if kept_path {
+        repairs.push(syntax_note("kept windows path backslashes"));
+    }
+    if kept_invalid {
+        repairs.push(syntax_note("kept invalid escapes"));
+    }
+    BackslashPass { text: out, repairs }
+}
+
+fn take_string_body(chars: &[char], open: usize) -> (usize, Vec<char>) {
+    let mut body = Vec::new();
+    let mut index = open + 1;
+    while index < chars.len() {
+        if chars[index] == '\\' {
+            if index + 1 >= chars.len() {
+                body.push('\\');
+                return (chars.len(), body);
+            }
+            if chars[index + 1] == '"' && path_backslash_closes(chars, &body, index) {
+                body.push('\\');
+                return (index + 1, body);
+            }
+            body.push('\\');
+            body.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        if chars[index] == '"' {
+            return (index, body);
+        }
+        body.push(chars[index]);
+        index += 1;
+    }
+    (index, body)
+}
+
+/// A `\"` at the end of a drive or UNC path is the separator, then the
+/// closer. An escaped quote inside the string stays an escaped quote,
+/// including when the text after it is `}` or a comma.
+fn path_backslash_closes(chars: &[char], body: &[char], backslash: usize) -> bool {
+    could_be_path_prefix(body) && quote_ends_the_string(chars, backslash + 2)
+}
+
+fn could_be_path_prefix(body: &[char]) -> bool {
+    if body.len() == 2 && body[0].is_ascii_alphabetic() && body[1] == ':' {
+        return true;
+    }
+    if body.len() >= 3
+        && body[0].is_ascii_alphabetic()
+        && body[1] == ':'
+        && (body[2] == '\\' || body[2] == '/')
+        && body.iter().copied().all(is_quoted_path_char)
+    {
+        return true;
+    }
+    body.len() >= 2
+        && body[0] == '\\'
+        && body[1] == '\\'
+        && body.iter().copied().all(is_quoted_path_char)
+}
+
+/// The quote after a path backslash closes the string only when the rest
+/// is JSON structure. `\"} more"` and `\", more"` keep the escaped quote.
+fn quote_ends_the_string(chars: &[char], index: usize) -> bool {
+    let index = skip_ascii_ws(chars, index);
+    if index >= chars.len() {
+        return true;
+    }
+    match chars[index] {
+        '}' | ']' => {
+            let after = skip_ascii_ws(chars, index + 1);
+            after >= chars.len() || matches!(chars[after], ',' | '}' | ']' | ':')
+        }
+        ',' => {
+            let after = skip_ascii_ws(chars, index + 1);
+            if after >= chars.len() || matches!(chars[after], '}' | ']' | '"') {
+                return true;
+            }
+            if starts_bare_word(chars[after]) {
+                let end = bare_word_end(chars, after);
+                let colon = skip_ascii_ws(chars, end);
+                return colon < chars.len() && chars[colon] == ':';
+            }
+            false
+        }
+        ':' => true,
+        _ => false,
+    }
+}
+
+fn skip_ascii_ws(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn str_could_be_path_prefix(body: &str) -> bool {
+    let chars: Vec<char> = body.chars().collect();
+    could_be_path_prefix(&chars)
+}
+
+fn structural_after(chars: &[char], mut index: usize) -> bool {
+    while index < chars.len() && chars[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index >= chars.len() || matches!(chars[index], ',' | '}' | ']' | ':')
+}
+
+fn rewrite_string_body(body: &[char]) -> String {
+    if is_unc_literal(body) {
+        return double_every_backslash(body);
+    }
+    let path = is_drive_path_body(body);
+    let mut out = String::with_capacity(body.len() + 8);
+    let mut index = 0;
+    while index < body.len() {
+        if body[index] != '\\' {
+            out.push(body[index]);
+            index += 1;
+            continue;
+        }
+        if index + 1 < body.len() && body[index + 1] == '\\' {
+            out.push('\\');
+            out.push('\\');
+            index += 2;
+            continue;
+        }
+        if is_unicode_escape(body, index) {
+            out.extend(body[index..index + 6].iter().copied());
+            index += 6;
+            continue;
+        }
+        if matches!(body.get(index + 1), Some('"' | '/')) {
+            out.push('\\');
+            out.push(body[index + 1]);
+            index += 2;
+            continue;
+        }
+        if !path && is_short_escape(body, index) {
+            out.push('\\');
+            out.push(body[index + 1]);
+            index += 2;
+            continue;
+        }
+        out.push('\\');
+        out.push('\\');
+        index += 1;
+    }
+    out
+}
+
+fn double_every_backslash(body: &[char]) -> String {
+    let mut out = String::with_capacity(body.len() * 2);
+    for ch in body {
+        if *ch == '\\' {
+            out.push_str("\\\\");
+        } else {
+            out.push(*ch);
+        }
+    }
+    out
+}
+
+fn is_drive_path_body(body: &[char]) -> bool {
+    body.len() >= 3
+        && body[0].is_ascii_alphabetic()
+        && body[1] == ':'
+        && (body[2] == '\\' || body[2] == '/')
+        && body.iter().copied().all(is_quoted_path_char)
+}
+
+/// `\\server\share` as the model wrote it, with a backslash that is not
+/// already a `\\` pair. A fully escaped UNC string is left alone.
+fn is_unc_literal(body: &[char]) -> bool {
+    if body.len() < 4 || body[0] != '\\' || body[1] != '\\' {
+        return false;
+    }
+    if !body.iter().copied().all(is_quoted_path_char) {
+        return false;
+    }
+    let mut index = 0;
+    let mut lone = false;
+    while index < body.len() {
+        if body[index] != '\\' {
+            index += 1;
+            continue;
+        }
+        if index + 1 < body.len() && body[index + 1] == '\\' {
+            index += 2;
+            continue;
+        }
+        lone = true;
+        index += 1;
+    }
+    lone
+}
+
+fn is_unicode_escape(body: &[char], index: usize) -> bool {
+    body.get(index) == Some(&'\\')
+        && body.get(index + 1) == Some(&'u')
+        && (2..6).all(|offset| {
+            body.get(index + offset)
+                .is_some_and(|ch| ch.is_ascii_hexdigit())
+        })
+}
+
+fn is_short_escape(body: &[char], index: usize) -> bool {
+    matches!(body.get(index + 1), Some('b' | 'f' | 'n' | 'r' | 't'))
+}
+
+fn is_quoted_path_char(ch: char) -> bool {
+    ch.is_alphanumeric()
+        || matches!(
+            ch,
+            ' ' | '\\'
+                | '/'
+                | ':'
+                | '.'
+                | '-'
+                | '_'
+                | '~'
+                | '$'
+                | '('
+                | ')'
+                | '+'
+                | '='
+                | '&'
+                | '@'
+                | '#'
+                | '%'
+                | '\''
+                | ','
+                | ';'
+        )
+}
+
+/// Quote a drive path or a `scheme://` URL used as one value.
+///
+/// `C:` followed by `/` or `\` is not a new key. `{a: 1}` stays a key
+/// and a number. A space ends the path when the next word is a key.
+pub(crate) fn quote_unquoted_paths(s: &str) -> String {
+    if !s.contains(':') && !s.contains('\\') {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '"' {
+            index = copy_quoted(&chars, index, &mut out);
+            continue;
+        }
+        if path_value_position(&chars, index)
+            && let Some(end) = unquoted_path_end(&chars, index)
+        {
+            push_json_string(&mut out, &chars[index..end]);
+            index = end;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn unquoted_path_end(chars: &[char], index: usize) -> Option<usize> {
+    let end = drive_path_end(chars, index)
+        .or_else(|| unc_path_end(chars, index))
+        .or_else(|| url_path_end(chars, index))?;
+    (end > index).then_some(end)
+}
+
+fn drive_path_end(chars: &[char], index: usize) -> Option<usize> {
+    if preceded_by_ident(chars, index) {
+        return None;
+    }
+    let letter = chars.get(index).copied()?;
+    if !letter.is_ascii_alphabetic() || chars.get(index + 1) != Some(&':') {
+        return None;
+    }
+    let sep = chars.get(index + 2).copied()?;
+    if sep != '/' && sep != '\\' {
+        return None;
+    }
+    Some(consume_unquoted_path(chars, index))
+}
+
+fn unc_path_end(chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index) != Some(&'\\') || chars.get(index + 1) != Some(&'\\') {
+        return None;
+    }
+    if !chars
+        .get(index + 2)
+        .is_some_and(|ch| ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(consume_unquoted_path(chars, index))
+}
+
+fn url_path_end(chars: &[char], index: usize) -> Option<usize> {
+    if preceded_by_ident(chars, index) {
+        return None;
+    }
+    if !chars.get(index).is_some_and(|ch| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut end = index + 1;
+    while end < chars.len() && chars[end].is_ascii_alphabetic() {
+        end += 1;
+    }
+    if end - index < 2 {
+        return None;
+    }
+    if chars.get(end) != Some(&':')
+        || chars.get(end + 1) != Some(&'/')
+        || chars.get(end + 2) != Some(&'/')
+    {
+        return None;
+    }
+    Some(consume_url(chars, index))
+}
+
+fn preceded_by_ident(chars: &[char], index: usize) -> bool {
+    index > 0 && (chars[index - 1].is_ascii_alphanumeric() || chars[index - 1] == '_')
+}
+
+fn consume_unquoted_path(chars: &[char], start: usize) -> usize {
+    let mut index = start;
+    loop {
+        while index < chars.len() && is_unquoted_path_char(chars[index]) {
+            index += 1;
+        }
+        if index < chars.len() && chars[index].is_whitespace() {
+            let mut next = index + 1;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if unquoted_path_continues(chars, next) {
+                index = next;
+                continue;
+            }
+        }
+        break;
+    }
+    index
+}
+
+fn unquoted_path_continues(chars: &[char], index: usize) -> bool {
+    if index >= chars.len() || !is_unquoted_path_char(chars[index]) {
+        return false;
+    }
+    if starts_bare_word(chars[index]) {
+        let end = bare_word_end(chars, index);
+        let mut next = end;
+        while next < chars.len() && chars[next].is_ascii_whitespace() {
+            next += 1;
+        }
+        if next < chars.len() && chars[next] == ':' {
+            return false;
+        }
+    }
+    true
+}
+
+fn consume_url(chars: &[char], start: usize) -> usize {
+    let mut index = start;
+    while index < chars.len() && is_url_char(chars[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn is_unquoted_path_char(ch: char) -> bool {
+    ch.is_alphanumeric()
+        || matches!(
+            ch,
+            '\\' | '/'
+                | ':'
+                | '.'
+                | '-'
+                | '_'
+                | '~'
+                | '$'
+                | '('
+                | ')'
+                | '+'
+                | '='
+                | '&'
+                | '@'
+                | '#'
+                | '%'
+                | '\''
+        )
+}
+
+fn is_url_char(ch: char) -> bool {
+    is_unquoted_path_char(ch) || ch == '?'
+}
+
+fn path_value_position(chars: &[char], index: usize) -> bool {
+    let mut prev = index;
+    while prev > 0 {
+        prev -= 1;
+        if !chars[prev].is_ascii_whitespace() {
+            return matches!(chars[prev], ':' | '[' | ',' | '=');
+        }
+    }
+    false
+}
+
+fn push_json_string(out: &mut String, chars: &[char]) {
+    out.push('"');
+    for ch in chars {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(*other),
+        }
+    }
+    out.push('"');
+}
+
 /// Unicode whitespace outside a string becomes an ASCII space.
 /// A no-break space inside a string stays.
 pub(crate) fn normalize_unicode_space(s: &str) -> String {
@@ -1543,6 +2050,10 @@ fn comment_can_start(chars: &[char], index: usize) -> bool {
         return true;
     }
     let prev = chars[index - 1];
+    // `http://` and `C://Users` are paths. `{a: // note}` is still a comment.
+    if prev == ':' && colon_is_inside_a_path(chars, index - 1) {
+        return false;
+    }
     if prev.is_ascii_whitespace() || matches!(prev, '{' | '[' | ',' | ':' | '}' | ']' | '"' | '\'')
     {
         return true;
@@ -1551,6 +2062,23 @@ fn comment_can_start(chars: &[char], index: usize) -> bool {
         return true;
     }
     finished_json_literal(chars, index)
+}
+
+/// `scheme://` or a drive `X://` in value position. The colon belongs to
+/// the path, so the slashes are not a line comment.
+fn colon_is_inside_a_path(chars: &[char], colon: usize) -> bool {
+    if chars.get(colon + 1) != Some(&'/') || chars.get(colon + 2) != Some(&'/') {
+        return false;
+    }
+    let mut start = colon;
+    while start > 0 && chars[start - 1].is_ascii_alphabetic() {
+        start -= 1;
+    }
+    let len = colon - start;
+    if len >= 2 {
+        return true;
+    }
+    len == 1 && path_value_position(chars, start)
 }
 
 fn finished_json_literal(chars: &[char], index: usize) -> bool {
@@ -2238,6 +2766,8 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 /// digit stays in the value. Any other `'` closes the string, and an
 /// unclosed string does not gain a closer. Quote repair runs after this
 /// stage, so `//` inside `'http://example.com'` is part of the value.
+/// `http://` and a drive `C://` keep their slashes. `{a: // note}` is
+/// still a comment.
 /// A `#` inside a string is also kept. Curly double quotes are skipped
 /// the same way, because quote normalization runs later. Curly single
 /// quotes are not strings.
