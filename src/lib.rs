@@ -576,6 +576,30 @@ mod tests {
     }
 
     #[test]
+    fn single_quoted_xml_name_keeps_an_apostrophe() {
+        let apostrophe = repair_json("<parameter name='O'Reilly'>x</parameter>");
+        let quoted = repair_json(r#"<parameter name="O'Reilly">x</parameter>"#);
+        match (apostrophe, quoted) {
+            (
+                RepairOutcome::Repaired { value: left, .. },
+                RepairOutcome::Repaired { value: right, .. },
+            ) => {
+                assert_eq!(left["O'Reilly"], "x");
+                assert!(left.get("O").is_none(), "{left}");
+                assert_eq!(right["O'Reilly"], "x");
+                assert_eq!(right["O'Reilly"], left["O'Reilly"]);
+            }
+            other => panic!("expected both repaired, got {other:?}"),
+        }
+        match repair_json("<parameter name='file'>a.rs</parameter>") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["file"], "a.rs");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn repeated_xml_parameter_is_ambiguous() {
         let raw = r#"<parameter name="file">a</parameter><parameter name="file">b</parameter>"#;
         let err = repair_args(&RepairRequest {
