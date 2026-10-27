@@ -130,15 +130,22 @@ fn strip_fence_info(rest: &str) -> &str {
     }
 }
 
+pub(crate) struct Truncation {
+    pub text: String,
+    pub dropped_prose: bool,
+}
+
 /// Close an open `{` / `[` stack when every string is already finished.
 ///
 /// An open string is left alone. Closing it would invent the end of a path
 /// or a key. A trailing `:` or `,` is also left alone, because the value is
 /// missing. A `{` or `[` that has not started a value is left alone too.
 /// Closing it would invent an empty container. A closer for an outer
-/// container inserts the missing inner closers first. A digit at the end
-/// of the input stays open, because the number may have been cut off.
-pub(crate) fn close_truncated(raw: &str) -> Option<String> {
+/// container inserts the missing inner closers first. A sentence while an
+/// outer container is still open is left outside that container. A digit
+/// at the end of the input stays open, because the number may have been
+/// cut off.
+pub(crate) fn close_truncated(raw: &str) -> Option<Truncation> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
         return None;
@@ -150,7 +157,15 @@ pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     let mut out = String::with_capacity(trimmed.len() + 4);
     let mut last_sig = None;
     let mut inserted = false;
-    for &ch in &chars {
+    let mut dropped_prose = false;
+    for (idx, &ch) in chars.iter().enumerate() {
+        if !in_string && !stack.is_empty() && matches!(last_sig, Some('}') | Some(']')) {
+            let rest: String = chars[idx..].iter().collect();
+            if suffix_is_only_prose(&rest) {
+                dropped_prose = true;
+                break;
+            }
+        }
         if in_string {
             out.push(ch);
             if escape {
@@ -228,10 +243,13 @@ pub(crate) fn close_truncated(raw: &str) -> Option<String> {
         out.push(closer);
         inserted = true;
     }
-    if !inserted {
+    if !inserted && !dropped_prose {
         return None;
     }
-    Some(out)
+    Some(Truncation {
+        text: out,
+        dropped_prose,
+    })
 }
 
 pub(crate) fn xml_parameters(raw: &str) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {

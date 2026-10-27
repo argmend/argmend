@@ -155,12 +155,15 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
     }
 
     if let Some(closed) = salvage::close_truncated(&staged.text) {
-        if let Ok(value) = serde_json::from_str::<Value>(&closed) {
+        if let Ok(value) = serde_json::from_str::<Value>(&closed.text) {
             prefix.extend(staged.repairs);
             prefix.push(note(RewriteKind::ClosedTruncation, "closed truncated json"));
-            return with_unique_keys(&closed, value, prefix);
+            if closed.dropped_prose {
+                prefix.push(note(RewriteKind::Syntax, "removed trailing prose"));
+            }
+            return with_unique_keys(&closed.text, value, prefix);
         }
-        if let Some(trimmed) = salvage::without_trailing_prose(&closed)
+        if let Some(trimmed) = salvage::without_trailing_prose(&closed.text)
             && let Ok(value) = serde_json::from_str::<Value>(&trimmed)
         {
             prefix.extend(staged.repairs);
@@ -522,6 +525,32 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+        match repair_json(r#"{a: {"b": ["x"} Thanks"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"]["b"][0], "x");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation)
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("trailing prose"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{a: {"b": 1} Thanks"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"]["b"], 1);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json(r#"{a: {"b": 1} true"#),
+            RepairOutcome::Unfixable(_)
+        ));
         assert!(matches!(
             repair_json("{\"note\": \"Hope this helps\"}"),
             RepairOutcome::Valid(_)
