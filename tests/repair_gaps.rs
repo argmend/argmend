@@ -749,10 +749,30 @@ fn path_backslash_only(before: &Value, after: &Value) -> bool {
                 })
         }
         (Value::String(left), Value::String(right)) => {
-            left == right || looks_like_windows_path(right)
+            left == right || windows_short_escape_restored(left, right)
         }
         _ => before == after,
     }
+}
+
+/// `after` is `before` with only tab, newline, CR, form feed, and
+/// backspace expanded to a backslash plus that letter.
+fn windows_short_escape_restored(before: &str, after: &str) -> bool {
+    if !looks_like_windows_path(after) {
+        return false;
+    }
+    let mut restored = String::new();
+    for ch in before.chars() {
+        match ch {
+            '\u{0008}' => restored.push_str("\\b"),
+            '\u{000c}' => restored.push_str("\\f"),
+            '\n' => restored.push_str("\\n"),
+            '\r' => restored.push_str("\\r"),
+            '\t' => restored.push_str("\\t"),
+            other => restored.push(other),
+        }
+    }
+    restored == after && restored != before
 }
 
 fn looks_like_windows_path(text: &str) -> bool {
@@ -762,6 +782,36 @@ fn looks_like_windows_path(text: &str) -> bool {
         (Some('\\'), Some('\\'), _) => true,
         _ => false,
     }
+}
+
+#[test]
+fn path_round_trip_only_restores_short_escapes() {
+    let before = json!({"path": "C:\temp", "note": "ok"});
+    let restored = json!({"path": "C:\\temp", "note": "ok"});
+    assert!(path_backslash_only(&before, &restored));
+    assert!(!path_backslash_only(
+        &before,
+        &json!({"path": "C:\\other", "note": "ok"})
+    ));
+    assert!(!path_backslash_only(
+        &json!({"path": "hello", "note": "ok"}),
+        &json!({"path": "C:\\x", "note": "ok"})
+    ));
+    assert!(path_backslash_only(
+        &json!({"note": "ok"}),
+        &json!({"note": "ok"})
+    ));
+    assert!(!path_backslash_only(
+        &json!({"note": "a\tb"}),
+        &json!({"note": "a\\tb"})
+    ));
+    let controls = format!("C:{}\r\u{000c}\u{0008}x", '\n');
+    let expanded = "C:\\n\\r\\f\\bx";
+    assert!(path_backslash_only(
+        &json!({"path": controls}),
+        &json!({"path": expanded})
+    ));
+    assert!(!path_backslash_only(&json!({"n": 1}), &json!({"n": 2})));
 }
 
 fn panic_schema(index: u8) -> Value {
