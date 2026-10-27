@@ -596,6 +596,45 @@ mod tests {
     }
 
     #[test]
+    fn missing_inner_closer_is_inserted_before_the_outer_one() {
+        match repair_json(r#"{a: ["x"}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"][0], "x");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation)
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{a: [1, 2, 3}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], json!([1, 2, 3]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{a: [["x"}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"][0][0], "x");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{a: [1, 2, 3"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"[1, "x"}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{"a": [1, "x"}}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
     fn open_string_stays_unfixable() {
         assert!(matches!(
             repair_json("{\"path\": \"src/mai"),

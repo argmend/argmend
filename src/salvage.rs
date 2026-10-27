@@ -123,7 +123,9 @@ fn strip_fence_info(rest: &str) -> &str {
 /// An open string is left alone. Closing it would invent the end of a path
 /// or a key. A trailing `:` or `,` is also left alone, because the value is
 /// missing. A `{` or `[` that has not started a value is left alone too.
-/// Closing it would invent an empty container.
+/// Closing it would invent an empty container. A closer for an outer
+/// container inserts the missing inner closers first. A digit at the end
+/// of the input stays open, because the number may have been cut off.
 pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
@@ -133,47 +135,89 @@ pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     let mut stack = Vec::new();
     let mut in_string = false;
     let mut escape = false;
+    let mut out = String::with_capacity(trimmed.len() + 4);
     let mut last_sig = None;
-    for ch in &chars {
+    let mut inserted = false;
+    for &ch in &chars {
         if in_string {
+            out.push(ch);
             if escape {
                 escape = false;
                 continue;
             }
-            if *ch == '\\' {
+            if ch == '\\' {
                 escape = true;
                 continue;
             }
-            if *ch == '"' {
+            if ch == '"' {
                 in_string = false;
                 last_sig = Some('"');
             }
             continue;
         }
         match ch {
-            '"' => in_string = true,
-            '{' => stack.push('}'),
-            '[' => stack.push(']'),
-            '}' | ']' => {
-                stack.pop();
+            '"' => {
+                in_string = true;
+                out.push(ch);
             }
-            other if other.is_whitespace() => {}
-            other => last_sig = Some(*other),
+            '{' => {
+                stack.push('}');
+                out.push(ch);
+                last_sig = Some('{');
+            }
+            '[' => {
+                stack.push(']');
+                out.push(ch);
+                last_sig = Some('[');
+            }
+            '}' | ']' => {
+                if stack.last() == Some(&ch) {
+                    stack.pop();
+                    out.push(ch);
+                    last_sig = Some(ch);
+                    continue;
+                }
+                if stack.contains(&ch) {
+                    while stack.last().copied() != Some(ch) {
+                        let Some(closer) = stack.pop() else {
+                            break;
+                        };
+                        out.push(closer);
+                        inserted = true;
+                    }
+                    stack.pop();
+                    out.push(ch);
+                    last_sig = Some(ch);
+                    continue;
+                }
+                out.push(ch);
+                last_sig = Some(ch);
+            }
+            other if other.is_whitespace() => out.push(other),
+            other => {
+                out.push(other);
+                last_sig = Some(other);
+            }
         }
     }
-    if in_string || stack.is_empty() {
+    if in_string {
         return None;
     }
-    if last_sig.is_none() || matches!(last_sig, Some(':') | Some(',')) {
+    if matches!(
+        last_sig,
+        None | Some(':') | Some(',') | Some('{') | Some('[')
+    ) {
         return None;
     }
-    // A final digit may be the start of a longer number that was cut off.
     if last_sig.is_some_and(|ch| ch.is_ascii_digit()) {
         return None;
     }
-    let mut out = trimmed.to_string();
     while let Some(closer) = stack.pop() {
         out.push(closer);
+        inserted = true;
+    }
+    if !inserted {
+        return None;
     }
     Some(out)
 }
