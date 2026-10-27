@@ -52,6 +52,14 @@ pub(crate) fn without_trailing_prose(text: &str) -> Option<String> {
     if !matches!(value, Value::Object(_) | Value::Array(_)) {
         return None;
     }
+    // `[TODO] fix it` becomes `["TODO"] fix it` after bare-word quoting.
+    // Those words are the text, not a sentence after a JSON value.
+    if let Value::Array(items) = &value
+        && items.len() == 1
+        && items[0].is_string()
+    {
+        return None;
+    }
     let offset = stream.byte_offset();
     let rest = text.get(offset..)?;
     if !suffix_is_only_prose(rest) {

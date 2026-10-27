@@ -482,6 +482,10 @@ mod tests {
             RepairOutcome::Unfixable(_)
         ));
         assert!(matches!(
+            repair_json("[TODO] fix it"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
             repair_json("{\"note\": \"Hope this helps\"}"),
             RepairOutcome::Valid(_)
         ));
