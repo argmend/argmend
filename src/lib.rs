@@ -80,6 +80,8 @@ pub enum RepairError {
 /// A repeated XML parameter name is [`RepairOutcome::Ambiguous`].
 /// An unescaped quote inside a string is Ambiguous too.
 /// A Windows path keeps its backslashes. An unquoted drive path is one string.
+/// A sentence after one object or array is removed. A second JSON value stays
+/// unfixable. A missing inner closer is inserted when the outer closer is present.
 pub fn repair_json(raw: &str) -> RepairOutcome {
     match salvage_value(raw) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
@@ -142,6 +144,14 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         }
         Err(err) => err,
     };
+
+    if let Some(trimmed) = salvage::without_trailing_prose(&staged.text)
+        && let Ok(value) = serde_json::from_str::<Value>(&trimmed)
+    {
+        prefix.extend(staged.repairs);
+        prefix.push(note(RewriteKind::Syntax, "removed trailing prose"));
+        return with_unique_keys(&trimmed, value, prefix);
+    }
 
     if let Some(closed) = salvage::close_truncated(&staged.text)
         && let Ok(value) = serde_json::from_str::<Value>(&closed)
@@ -399,6 +409,89 @@ mod tests {
     }
 
     #[test]
+    fn trailing_prose_after_one_json_value_is_removed() {
+        match repair_json("{\"a\": 1}\nHope this helps") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("trailing prose"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{a: 1}\nThanks") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("```json\n{\"a\": 1}\n```\nThanks") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(repairs.iter().any(|item| item.kind == RewriteKind::Fence));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("```json\n{\"a\": 1}\n```\nLet me know if you need more.") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("```json\n{a: 1}\n```\nThanks") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(repairs.iter().any(|item| item.kind == RewriteKind::Fence));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("[1, 2]\nThanks") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, json!([1, 2]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{\"a\":1}{\"b\":2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("[1, 2][3]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1}\nsee {b: 2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1} b: 2"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1}\nNote: done"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1} true"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1} 2"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("\"hello\" world"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("[TODO] fix it"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"note\": \"Hope this helps\"}"),
+            RepairOutcome::Valid(_)
+        ));
+    }
+
+    #[test]
     fn fence_with_jsonc_tag_unwraps() {
         let raw = "```jsonc\n{file: \"a.rs\"}\n```";
         let repaired = repair_args(&RepairRequest {
@@ -506,6 +599,45 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn missing_inner_closer_is_inserted_before_the_outer_one() {
+        match repair_json(r#"{a: ["x"}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"][0], "x");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation)
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{a: [1, 2, 3}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], json!([1, 2, 3]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json(r#"{a: [["x"}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"][0][0], "x");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{a: [1, 2, 3"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"[1, "x"}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{"a": [1, "x"}}"#),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     #[test]

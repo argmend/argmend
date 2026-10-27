@@ -11,7 +11,7 @@ pub(crate) fn unwrap_fence(raw: &str) -> Option<String> {
     let rest = rest.strip_prefix('\n').unwrap_or(rest);
     if let Some(end) = rest.rfind("```") {
         let tail = &rest[end + 3..];
-        if tail.trim().is_empty() || tail_is_comment(tail) {
+        if tail.trim().is_empty() || tail_is_comment(tail) || suffix_is_only_prose(tail) {
             return Some(rest[..end].trim().to_string());
         }
         return None;
@@ -40,6 +40,59 @@ fn tail_is_comment(tail: &str) -> bool {
         None => true,
         Some((_, after)) => after.trim().is_empty(),
     }
+}
+
+/// Keep one finished object or array and drop a sentence after it.
+///
+/// A second JSON value, a number, or a string stays in place. Dropping
+/// that tail would hide another value.
+pub(crate) fn without_trailing_prose(text: &str) -> Option<String> {
+    let mut stream = serde_json::Deserializer::from_str(text).into_iter::<Value>();
+    let value = stream.next()?.ok()?;
+    if !matches!(value, Value::Object(_) | Value::Array(_)) {
+        return None;
+    }
+    // `[TODO] fix it` becomes `["TODO"] fix it` after bare-word quoting.
+    // Those words are the text, not a sentence after a JSON value.
+    if let Value::Array(items) = &value
+        && items.len() == 1
+        && items[0].is_string()
+    {
+        return None;
+    }
+    let offset = stream.byte_offset();
+    let rest = text.get(offset..)?;
+    if !suffix_is_only_prose(rest) {
+        return None;
+    }
+    Some(text[..offset].trim_end().to_string())
+}
+
+/// `tail` is a sentence, not another JSON value.
+fn suffix_is_only_prose(tail: &str) -> bool {
+    let rest = tail.trim();
+    if rest.is_empty()
+        || rest.contains('{')
+        || rest.contains('[')
+        || rest.contains('`')
+        || rest.contains(':')
+    {
+        return false;
+    }
+    let Some(first) = rest.chars().next() else {
+        return false;
+    };
+    if first.is_ascii_digit() || matches!(first, '"' | '-' | '+' | ';' | ',' | ':' | '/') {
+        return false;
+    }
+    let word_end = rest
+        .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .unwrap_or(rest.len());
+    let word = &rest[..word_end];
+    !matches!(
+        word,
+        "true" | "false" | "null" | "True" | "False" | "None" | "undefined" | "NaN" | "Infinity"
+    )
 }
 
 /// Drop a fence info string such as `json`, `jsonc`, or `json5` when it is a tag.
@@ -78,7 +131,9 @@ fn strip_fence_info(rest: &str) -> &str {
 /// An open string is left alone. Closing it would invent the end of a path
 /// or a key. A trailing `:` or `,` is also left alone, because the value is
 /// missing. A `{` or `[` that has not started a value is left alone too.
-/// Closing it would invent an empty container.
+/// Closing it would invent an empty container. A closer for an outer
+/// container inserts the missing inner closers first. A digit at the end
+/// of the input stays open, because the number may have been cut off.
 pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
@@ -88,47 +143,89 @@ pub(crate) fn close_truncated(raw: &str) -> Option<String> {
     let mut stack = Vec::new();
     let mut in_string = false;
     let mut escape = false;
+    let mut out = String::with_capacity(trimmed.len() + 4);
     let mut last_sig = None;
-    for ch in &chars {
+    let mut inserted = false;
+    for &ch in &chars {
         if in_string {
+            out.push(ch);
             if escape {
                 escape = false;
                 continue;
             }
-            if *ch == '\\' {
+            if ch == '\\' {
                 escape = true;
                 continue;
             }
-            if *ch == '"' {
+            if ch == '"' {
                 in_string = false;
                 last_sig = Some('"');
             }
             continue;
         }
         match ch {
-            '"' => in_string = true,
-            '{' => stack.push('}'),
-            '[' => stack.push(']'),
-            '}' | ']' => {
-                stack.pop();
+            '"' => {
+                in_string = true;
+                out.push(ch);
             }
-            other if other.is_whitespace() => {}
-            other => last_sig = Some(*other),
+            '{' => {
+                stack.push('}');
+                out.push(ch);
+                last_sig = Some('{');
+            }
+            '[' => {
+                stack.push(']');
+                out.push(ch);
+                last_sig = Some('[');
+            }
+            '}' | ']' => {
+                if stack.last() == Some(&ch) {
+                    stack.pop();
+                    out.push(ch);
+                    last_sig = Some(ch);
+                    continue;
+                }
+                if stack.contains(&ch) {
+                    while stack.last().copied() != Some(ch) {
+                        let Some(closer) = stack.pop() else {
+                            break;
+                        };
+                        out.push(closer);
+                        inserted = true;
+                    }
+                    stack.pop();
+                    out.push(ch);
+                    last_sig = Some(ch);
+                    continue;
+                }
+                out.push(ch);
+                last_sig = Some(ch);
+            }
+            other if other.is_whitespace() => out.push(other),
+            other => {
+                out.push(other);
+                last_sig = Some(other);
+            }
         }
     }
-    if in_string || stack.is_empty() {
+    if in_string {
         return None;
     }
-    if last_sig.is_none() || matches!(last_sig, Some(':') | Some(',')) {
+    if matches!(
+        last_sig,
+        None | Some(':') | Some(',') | Some('{') | Some('[')
+    ) {
         return None;
     }
-    // A final digit may be the start of a longer number that was cut off.
     if last_sig.is_some_and(|ch| ch.is_ascii_digit()) {
         return None;
     }
-    let mut out = trimmed.to_string();
     while let Some(closer) = stack.pop() {
         out.push(closer);
+        inserted = true;
+    }
+    if !inserted {
+        return None;
     }
     Some(out)
 }
