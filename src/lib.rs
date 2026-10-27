@@ -2327,6 +2327,26 @@ mod tests {
             RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "C"),
             other => panic!("bare letter -> {other:?}"),
         }
+        one_path("{path: C://Users/a.rs}", "path", "C://Users/a.rs");
+        one_path(
+            "{url: http://example.com/a} // tail",
+            "url",
+            "http://example.com/a",
+        );
+        match repair_json("{url: http://example.com/a} // tail") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert!(!value.to_string().contains("tail"), "{value}");
+            }
+            other => panic!("url comment -> {other:?}"),
+        }
+        match repair_json("{a: 1 // note\n}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("comment after a colon -> {other:?}"),
+        }
+        assert!(
+            matches!(repair_json("{a://note}"), RepairOutcome::Unfixable(_)),
+            "a key colon and // is still a comment"
+        );
     }
 
     #[test]
