@@ -143,6 +143,14 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         Err(err) => err,
     };
 
+    if let Some(trimmed) = salvage::without_trailing_prose(&staged.text)
+        && let Ok(value) = serde_json::from_str::<Value>(&trimmed)
+    {
+        prefix.extend(staged.repairs);
+        prefix.push(note(RewriteKind::Syntax, "removed trailing prose"));
+        return with_unique_keys(&trimmed, value, prefix);
+    }
+
     if let Some(closed) = salvage::close_truncated(&staged.text)
         && let Ok(value) = serde_json::from_str::<Value>(&closed)
     {
@@ -395,6 +403,85 @@ mod tests {
         assert!(matches!(
             repair_json("```json\n{\"a\": 1}\n```\n{\"b\": 2}"),
             RepairOutcome::Unfixable(_)
+        ));
+    }
+
+    #[test]
+    fn trailing_prose_after_one_json_value_is_removed() {
+        match repair_json("{\"a\": 1}\nHope this helps") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("trailing prose"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("{a: 1}\nThanks") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("```json\n{\"a\": 1}\n```\nThanks") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(repairs.iter().any(|item| item.kind == RewriteKind::Fence));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("```json\n{\"a\": 1}\n```\nLet me know if you need more.") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("```json\n{a: 1}\n```\nThanks") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(repairs.iter().any(|item| item.kind == RewriteKind::Fence));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("[1, 2]\nThanks") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value, json!([1, 2]));
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_json("{\"a\":1}{\"b\":2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("[1, 2][3]"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1}\nsee {b: 2}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1} b: 2"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1}\nNote: done"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1} true"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"a\":1} 2"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("\"hello\" world"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("{\"note\": \"Hope this helps\"}"),
+            RepairOutcome::Valid(_)
         ));
     }
 

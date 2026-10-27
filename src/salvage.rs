@@ -11,7 +11,7 @@ pub(crate) fn unwrap_fence(raw: &str) -> Option<String> {
     let rest = rest.strip_prefix('\n').unwrap_or(rest);
     if let Some(end) = rest.rfind("```") {
         let tail = &rest[end + 3..];
-        if tail.trim().is_empty() || tail_is_comment(tail) {
+        if tail.trim().is_empty() || tail_is_comment(tail) || suffix_is_only_prose(tail) {
             return Some(rest[..end].trim().to_string());
         }
         return None;
@@ -40,6 +40,51 @@ fn tail_is_comment(tail: &str) -> bool {
         None => true,
         Some((_, after)) => after.trim().is_empty(),
     }
+}
+
+/// Keep one finished object or array and drop a sentence after it.
+///
+/// A second JSON value, a number, or a string stays in place. Dropping
+/// that tail would hide another value.
+pub(crate) fn without_trailing_prose(text: &str) -> Option<String> {
+    let mut stream = serde_json::Deserializer::from_str(text).into_iter::<Value>();
+    let value = stream.next()?.ok()?;
+    if !matches!(value, Value::Object(_) | Value::Array(_)) {
+        return None;
+    }
+    let offset = stream.byte_offset();
+    let rest = text.get(offset..)?;
+    if !suffix_is_only_prose(rest) {
+        return None;
+    }
+    Some(text[..offset].trim_end().to_string())
+}
+
+/// `tail` is a sentence, not another JSON value.
+fn suffix_is_only_prose(tail: &str) -> bool {
+    let rest = tail.trim();
+    if rest.is_empty()
+        || rest.contains('{')
+        || rest.contains('[')
+        || rest.contains('`')
+        || rest.contains(':')
+    {
+        return false;
+    }
+    let Some(first) = rest.chars().next() else {
+        return false;
+    };
+    if first.is_ascii_digit() || matches!(first, '"' | '-' | '+' | ';' | ',' | ':' | '/') {
+        return false;
+    }
+    let word_end = rest
+        .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .unwrap_or(rest.len());
+    let word = &rest[..word_end];
+    !matches!(
+        word,
+        "true" | "false" | "null" | "True" | "False" | "None" | "undefined" | "NaN" | "Infinity"
+    )
 }
 
 /// Drop a fence info string such as `json`, `jsonc`, or `json5` when it is a tag.
