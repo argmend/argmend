@@ -74,6 +74,8 @@ fn suffix_is_only_prose(tail: &str) -> bool {
     if rest.is_empty()
         || rest.contains('{')
         || rest.contains('[')
+        || rest.contains('}')
+        || rest.contains(']')
         || rest.contains('`')
         || rest.contains(':')
     {
@@ -82,7 +84,9 @@ fn suffix_is_only_prose(tail: &str) -> bool {
     let Some(first) = rest.chars().next() else {
         return false;
     };
-    if first.is_ascii_digit() || matches!(first, '"' | '-' | '+' | ';' | ',' | ':' | '/') {
+    if first.is_ascii_digit()
+        || matches!(first, '"' | '-' | '+' | ';' | ',' | ':' | '/' | '}' | ']')
+    {
         return false;
     }
     let word_end = rest

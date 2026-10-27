@@ -81,7 +81,8 @@ pub enum RepairError {
 /// An unescaped quote inside a string is Ambiguous too.
 /// A Windows path keeps its backslashes. An unquoted drive path is one string.
 /// A sentence after one object or array is removed. A second JSON value stays
-/// unfixable. A missing inner closer is inserted when the outer closer is present.
+/// unfixable. An extra `}` or `]` stays unfixable. A missing inner closer is
+/// inserted when the outer closer is present.
 pub fn repair_json(raw: &str) -> RepairOutcome {
     match salvage_value(raw) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
@@ -153,12 +154,20 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         return with_unique_keys(&trimmed, value, prefix);
     }
 
-    if let Some(closed) = salvage::close_truncated(&staged.text)
-        && let Ok(value) = serde_json::from_str::<Value>(&closed)
-    {
-        prefix.extend(staged.repairs);
-        prefix.push(note(RewriteKind::ClosedTruncation, "closed truncated json"));
-        return with_unique_keys(&closed, value, prefix);
+    if let Some(closed) = salvage::close_truncated(&staged.text) {
+        if let Ok(value) = serde_json::from_str::<Value>(&closed) {
+            prefix.extend(staged.repairs);
+            prefix.push(note(RewriteKind::ClosedTruncation, "closed truncated json"));
+            return with_unique_keys(&closed, value, prefix);
+        }
+        if let Some(trimmed) = salvage::without_trailing_prose(&closed)
+            && let Ok(value) = serde_json::from_str::<Value>(&trimmed)
+        {
+            prefix.extend(staged.repairs);
+            prefix.push(note(RewriteKind::ClosedTruncation, "closed truncated json"));
+            prefix.push(note(RewriteKind::Syntax, "removed trailing prose"));
+            return with_unique_keys(&trimmed, value, prefix);
+        }
     }
 
     match salvage::xml_parameters(&body)? {
@@ -485,6 +494,34 @@ mod tests {
             repair_json("[TODO] fix it"),
             RepairOutcome::Unfixable(_)
         ));
+        assert!(matches!(
+            repair_json(r#"{"a": 1}}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{"a": 1}]"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{"a": 1} }"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_json(r#"{a: ["x"} Thanks"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"][0], "x");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation)
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("trailing prose"))
+                );
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
         assert!(matches!(
             repair_json("{\"note\": \"Hope this helps\"}"),
             RepairOutcome::Valid(_)
