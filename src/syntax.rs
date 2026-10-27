@@ -457,6 +457,38 @@ pub(crate) fn strip_control_chars(s: &str) -> String {
 /// appear in *key* or *value* positions (outside existing double-quoted
 /// strings). Apostrophes that appear inside an already double-quoted
 /// string are left untouched.
+/// A `'` span whose closer is followed by another bare word is a phrase
+/// (`rock 'n' roll`), not a JSON string. Converting it would invent a key.
+fn single_quote_is_mid_phrase(chars: &[char], open: usize) -> bool {
+    let mut index = open + 1;
+    let len = chars.len();
+    while index < len {
+        if chars[index] == '\\' {
+            index += 1;
+            if index < len {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '\'' {
+            let inside = chars
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_alphanumeric());
+            if inside {
+                index += 1;
+                continue;
+            }
+            let mut next = index + 1;
+            while next < len && chars[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            return next < len && (chars[next].is_alphabetic() || chars[next] == '_');
+        }
+        index += 1;
+    }
+    false
+}
+
 pub(crate) fn fix_single_quotes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -490,6 +522,11 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
             // Convert single-quoted string to double-quoted string.
             '\'' => {
                 if i > 0 && chars[i - 1].is_alphanumeric() {
+                    out.push('\'');
+                    i += 1;
+                    continue;
+                }
+                if single_quote_is_mid_phrase(&chars, i) {
                     out.push('\'');
                     i += 1;
                     continue;
@@ -3506,6 +3543,25 @@ mod tests {
             RepairOutcome::Repaired { value, .. } => {
                 assert_eq!(value["author"], "O'Reilly");
             }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phrase_with_a_quoted_fragment_stays_unfixable() {
+        assert!(
+            matches!(
+                repair_tool_call_json("{title: rock 'n' roll}"),
+                RepairOutcome::Unfixable(_)
+            ),
+            "a phrase must not become a second key"
+        );
+        match repair_tool_call_json("{a: 'n'}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "n"),
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{'n': 1}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["n"], 1),
             other => panic!("expected Repaired, got {other:?}"),
         }
     }
