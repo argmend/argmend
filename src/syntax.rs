@@ -983,7 +983,7 @@ pub(crate) fn quote_bare_keys(s: &str) -> String {
                     if hyphenated + 1 < len
                         && (chars[hyphenated] == '-'
                             || chars[hyphenated] == '.'
-                            || chars[hyphenated] == '\'')
+                            || is_word_apostrophe(chars[hyphenated]))
                         && (chars[hyphenated + 1].is_alphanumeric() || chars[hyphenated + 1] == '_')
                     {
                         hyphenated += 1;
@@ -1794,6 +1794,10 @@ fn starts_bare_word(ch: char) -> bool {
     ch.is_alphabetic() || ch == '_'
 }
 
+fn is_word_apostrophe(ch: char) -> bool {
+    ch == '\'' || ch == '\u{2019}'
+}
+
 fn bare_word_end(chars: &[char], start: usize) -> usize {
     let mut index = start + 1;
     let len = chars.len();
@@ -1802,7 +1806,7 @@ fn bare_word_end(chars: &[char], start: usize) -> usize {
     }
     loop {
         if index + 1 < len
-            && (chars[index] == '-' || chars[index] == '.' || chars[index] == '\'')
+            && (chars[index] == '-' || chars[index] == '.' || is_word_apostrophe(chars[index]))
             && (chars[index + 1].is_alphanumeric() || chars[index + 1] == '_')
         {
             index += 1;
@@ -3545,6 +3549,32 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bare_word_keeps_a_curly_apostrophe() {
+        match repair_tool_call_json("{author: O\u{2019}Reilly}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["author"], "O\u{2019}Reilly");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{msg: it\u{2019}s}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["msg"], "it\u{2019}s");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_tool_call_json("{O\u{2019}Reilly: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["O\u{2019}Reilly"], 1);
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{\u{2018}note\u{2019}: 1}"),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     #[test]
