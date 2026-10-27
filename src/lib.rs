@@ -80,6 +80,8 @@ pub enum RepairError {
 /// A repeated XML parameter name is [`RepairOutcome::Ambiguous`].
 /// An unescaped quote inside a string is Ambiguous too.
 /// A Windows path keeps its backslashes. An unquoted drive path is one string.
+/// A sentence after one object or array is removed. A second JSON value stays
+/// unfixable. A missing inner closer is inserted when the outer closer is present.
 pub fn repair_json(raw: &str) -> RepairOutcome {
     match salvage_value(raw) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
