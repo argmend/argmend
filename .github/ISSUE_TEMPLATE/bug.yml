@@ -1,0 +1,31 @@
+name: Bug
+description: A repair result that is wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: input
+    attributes:
+      label: Input
+      description: The exact string passed to repair_json or repair_args. Include the schema when you used one.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      description: Valid, Repaired, Unfixable, or Ambiguous, and the value or message.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Crate version
+      placeholder: "0.2.8"
+    validations:
+      required: true

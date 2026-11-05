@@ -1,3 +1,6 @@
+> **Human contributors:** This file is for AI coding assistants.
+> You can safely ignore it. See README.md and CONTRIBUTING.md instead.
+
 # Argmend
 
 Every commit needs `git commit -s`. The sign-off email is `git config user.email`.

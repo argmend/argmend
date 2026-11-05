@@ -1,13 +1,13 @@
 [package]
 name = "argmend"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-description = "Reserved."
+description = "Argmend repairs broken tool-call arguments into JSON."
 repository = "https://github.com/argmend/argmend"
-keywords = []
-categories = []
+keywords = ["json", "llm", "tool-call"]
+categories = ["encoding"]
 readme = "README.md"
 
 [dependencies]
