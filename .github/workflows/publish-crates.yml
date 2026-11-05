@@ -42,9 +42,7 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.tag || github.ref }}
           path: crate
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: "1.95"
+      - uses: ./.github/actions/setup-rust
       - id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - name: Publish to crates.io
