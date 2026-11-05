@@ -79,7 +79,8 @@ pub enum RepairError {
 ///
 /// A repeated XML parameter name is [`RepairOutcome::Ambiguous`].
 /// An unescaped quote inside a string is Ambiguous too.
-/// A Windows path keeps its backslashes. An unquoted drive path is one string.
+/// A Windows path keeps its backslashes, including one inside a sentence.
+/// An unquoted drive path is one string.
 /// A sentence after one object or array is removed. A second JSON value stays
 /// unfixable. An extra `}` or `]` stays unfixable. A missing inner closer is
 /// inserted when the outer closer is present.
@@ -2424,6 +2425,150 @@ mod tests {
                 );
             }
             other => panic!("syntax entry -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn windows_path_punctuation_is_still_a_path() {
+        fn one_path(raw: &str, key: &str, expected: &str) {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value[key], expected, "{raw}");
+                    assert!(
+                        repairs
+                            .iter()
+                            .any(|item| item.detail.contains("windows path")),
+                        "{raw} {repairs:?}"
+                    );
+                    let again = serde_json::to_string(&value).expect("serialize");
+                    match repair_json(&again) {
+                        RepairOutcome::Valid(stable) => assert_eq!(stable[key], expected, "{raw}"),
+                        other => panic!("second pass of {raw:?} via {again} -> {other:?}"),
+                    }
+                }
+                other => panic!("{raw:?} -> {other:?}"),
+            }
+        }
+
+        one_path(r#"{"path": "C:\foo!bar"}"#, "path", "C:\\foo!bar");
+        one_path(
+            r#"{"path": "C:\temp\file?.log"}"#,
+            "path",
+            "C:\\temp\\file?.log",
+        );
+        one_path(
+            r#"{"path": "C:\new\report*.txt"}"#,
+            "path",
+            "C:\\new\\report*.txt",
+        );
+        one_path(r#"{"path": "C:\bin[1]\a.rs"}"#, "path", "C:\\bin[1]\\a.rs");
+        match repair_json(r"{path: C:\foo!bar}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["path"], "C:\\foo!bar");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("bare paths")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("unquoted bang -> {other:?}"),
+        }
+        match repair_json(r"{path: C:\temp\file?.log}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\temp\\file?.log");
+            }
+            other => panic!("unquoted question mark -> {other:?}"),
+        }
+        match repair_json(r"{path: C:\new\report*.txt}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\new\\report*.txt");
+            }
+            other => panic!("unquoted star -> {other:?}"),
+        }
+        match repair_json(r"{path: C:\foo!bar, line: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\foo!bar");
+                assert_eq!(value["line"], 1);
+            }
+            other => panic!("unquoted bang with a sibling -> {other:?}"),
+        }
+        match repair_json(r"[C:\foo!bar, D:\b.rs]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value[0], "C:\\foo!bar");
+                assert_eq!(value[1], "D:\\b.rs");
+            }
+            other => panic!("array still closes after a bang -> {other:?}"),
+        }
+        match repair_json(r#"{"msg": "a\tb"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["msg"], "a\tb"),
+            other => panic!("real tab -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn windows_path_inside_a_sentence_keeps_its_backslashes() {
+        fn one_path(raw: &str, key: &str, expected: &str) {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value[key], expected, "{raw} {value}");
+                    assert!(
+                        repairs
+                            .iter()
+                            .any(|item| item.detail.contains("windows path")),
+                        "{raw} {repairs:?}"
+                    );
+                    let again = serde_json::to_string(&value).expect("serialize");
+                    match repair_json(&again) {
+                        RepairOutcome::Valid(stable) => assert_eq!(stable[key], expected, "{raw}"),
+                        other => panic!("second pass of {raw:?} via {again} -> {other:?}"),
+                    }
+                }
+                other => panic!("{raw:?} -> {other:?}"),
+            }
+        }
+
+        one_path(
+            r#"{"note": "save it at C:\temp"}"#,
+            "note",
+            "save it at C:\\temp",
+        );
+        one_path(
+            r#"{"content": "See C:\new\a.rs please"}"#,
+            "content",
+            "See C:\\new\\a.rs please",
+        );
+        match repair_json(r#"{"msg": "line\nbreak"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["msg"], "line\nbreak"),
+            other => panic!("real newline -> {other:?}"),
+        }
+        match repair_json(r#"{"note": "save it at C:\\temp\nhome"}"#) {
+            RepairOutcome::Valid(value) => {
+                assert_eq!(value["note"], "save it at C:\\temp\nhome");
+            }
+            other => panic!("escaped path plus a real newline -> {other:?}"),
+        }
+        match repair_json(r#"{"note": "see C:/temp\nnext"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["note"], "see C:/temp\nnext"),
+            other => panic!("forward-slash path plus a newline -> {other:?}"),
+        }
+        match repair_json(r#"{"a": "C:\temp | \q"}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], "C:\\temp | \\q");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("windows path")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("invalid escape")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("path and an invalid escape -> {other:?}"),
         }
     }
 
