@@ -1,6 +1,7 @@
 name: Dependabot auto-merge
 
-on:
+# This job does not check out the pull request. It only approves Dependabot.
+on: # zizmor: ignore[dangerous-triggers]
   pull_request_target:
 
 permissions:
