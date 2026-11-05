@@ -1,0 +1,113 @@
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to label again
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-triage-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  label:
+    name: Label issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
+      - name: Apply triage labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DISPATCH_ISSUE: ${{ inputs.issue_number }}
+        with:
+          script: |
+            const trustedAssociation = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+            const trustedPermission = new Set(["admin", "maintain", "write"]);
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function isTrusted(login, association) {
+              if (trustedAssociation.has(association)) {
+                return true;
+              }
+              try {
+                const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner, repo, username: login,
+                });
+                return trustedPermission.has(perm.permission);
+              } catch (error) {
+                if (error.status === 404) {
+                  return false;
+                }
+                throw error;
+              }
+            }
+
+            async function ensureLabels(issueNumber, login, association, existingNames) {
+              const trusted = await isTrusted(login, association);
+              const names = new Set(existingNames);
+              if (trusted || names.has("ready")) {
+                if (!names.has("ready")) {
+                  await github.rest.issues.addLabels({
+                    owner, repo, issue_number: issueNumber, labels: ["ready"],
+                  });
+                }
+                if (names.has("needs-triage")) {
+                  try {
+                    await github.rest.issues.removeLabel({
+                      owner, repo, issue_number: issueNumber, name: "needs-triage",
+                    });
+                  } catch (error) {
+                    if (error.status !== 404) throw error;
+                  }
+                }
+                core.info(`Issue #${issueNumber} from @${login} is ready`);
+                return;
+              }
+              if (!names.has("needs-triage")) {
+                await github.rest.issues.addLabels({
+                  owner, repo, issue_number: issueNumber, labels: ["needs-triage"],
+                });
+              }
+              core.info(`Issue #${issueNumber} from @${login} needs triage`);
+            }
+
+            if (context.eventName === "workflow_dispatch") {
+              const issueNumber = parseInt(process.env.DISPATCH_ISSUE || "", 10);
+              if (!issueNumber) {
+                core.setFailed("workflow_dispatch requires issue_number");
+                return;
+              }
+              const { data: issue } = await github.rest.issues.get({
+                owner, repo, issue_number: issueNumber,
+              });
+              await ensureLabels(
+                issueNumber,
+                issue.user.login,
+                issue.author_association,
+                (issue.labels || []).map((label) => (typeof label === "string" ? label : label.name)),
+              );
+              return;
+            }
+
+            const issue = context.payload.issue;
+            await ensureLabels(
+              issue.number,
+              issue.user.login,
+              issue.author_association,
+              (issue.labels || []).map((label) => (typeof label === "string" ? label : label.name)),
+            );
