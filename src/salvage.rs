@@ -143,9 +143,10 @@ pub(crate) struct Truncation {
 /// Closing it would invent an empty container. A closer for an outer
 /// container inserts the missing inner closers first. A sentence while an
 /// outer container is still open is left outside that container. A digit
-/// at the end of the input stays open, because the number may have been
-/// cut off.
+/// that is the last character stays open, because the number may have
+/// been cut off. Whitespace after that digit means the number ended.
 pub(crate) fn close_truncated(raw: &str) -> Option<Truncation> {
+    let number_already_ended = raw.trim_end().len() != raw.len();
     let trimmed = raw.trim();
     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
         return None;
@@ -236,7 +237,7 @@ pub(crate) fn close_truncated(raw: &str) -> Option<Truncation> {
     ) {
         return None;
     }
-    if last_sig.is_some_and(|ch| ch.is_ascii_digit()) {
+    if last_sig.is_some_and(|ch| ch.is_ascii_digit()) && !number_already_ended {
         return None;
     }
     while let Some(closer) = stack.pop() {
