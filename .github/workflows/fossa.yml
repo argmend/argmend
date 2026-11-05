@@ -1,0 +1,107 @@
+name: FOSSA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.*"
+      - "src/**"
+      - "scripts/fossa-filter.py"
+      - ".github/workflows/fossa.yml"
+  pull_request:
+    paths:
+      - "Cargo.*"
+      - "src/**"
+      - "scripts/fossa-filter.py"
+      - ".github/workflows/fossa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fossa-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  fossa:
+    name: FOSSA Analyze
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      skip: ${{ steps.check-key.outputs.skip }}
+    steps:
+      - name: Check FOSSA API key
+        id: check-key
+        env:
+          FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
+        run: |
+          if [ -z "$FOSSA_API_KEY" ]; then
+            echo "FOSSA_API_KEY not configured, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2
+        if: steps.check-key.outputs.skip != 'true'
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.check-key.outputs.skip != 'true'
+        with:
+          persist-credentials: false
+      - uses: fossas/fossa-action@29693cc50323968e039056be419b32989fc5880c # v2.0.0
+        if: steps.check-key.outputs.skip != 'true'
+        with:
+          api-key: ${{ secrets.FOSSA_API_KEY }}
+
+  fossa-test:
+    name: FOSSA License Check
+    needs: fossa
+    if: needs.fossa.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check FOSSA API key
+        id: check-key
+        env:
+          FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
+        run: |
+          if [ -z "$FOSSA_API_KEY" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2
+        if: steps.check-key.outputs.skip != 'true'
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.check-key.outputs.skip != 'true'
+        with:
+          persist-credentials: false
+      - name: Install FOSSA CLI
+        if: steps.check-key.outputs.skip != 'true'
+        env:
+          FOSSA_VERSION: "3.17.10"
+        run: |
+          curl -fsSL "https://github.com/fossas/fossa-cli/releases/download/v${FOSSA_VERSION}/fossa_${FOSSA_VERSION}_linux_amd64.tar.gz" -o "fossa_${FOSSA_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "https://github.com/fossas/fossa-cli/releases/download/v${FOSSA_VERSION}/fossa_${FOSSA_VERSION}_linux_amd64.tar.gz.sha256" -o "fossa_${FOSSA_VERSION}_linux_amd64.tar.gz.sha256"
+          sha256sum -c "fossa_${FOSSA_VERSION}_linux_amd64.tar.gz.sha256"
+          tar xzf "fossa_${FOSSA_VERSION}_linux_amd64.tar.gz" fossa
+          sudo install fossa /usr/local/bin/fossa
+      - name: Run FOSSA test with false-positive filtering
+        if: steps.check-key.outputs.skip != 'true'
+        env:
+          FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
+        run: |
+          set +e
+          fossa test --format json > fossa-results.json 2>fossa-stderr.txt
+          TEST_EXIT=$?
+          set -e
+          if grep -Eq 'status code: (429|502|503|504)' fossa-results.json fossa-stderr.txt; then
+            echo "FOSSA returned a transient HTTP error"
+            exit 1
+          fi
+          if [ "$TEST_EXIT" -eq 0 ]; then
+            echo "FOSSA test passed with no issues."
+            exit 0
+          fi
+          python3 scripts/fossa-filter.py fossa-results.json

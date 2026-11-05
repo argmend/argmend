@@ -8,6 +8,8 @@ Argmend repairs broken tool-call arguments into JSON.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](./LICENSE)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/argmend/argmend/badge)](https://securityscorecards.dev/viewer/?uri=github.com/argmend/argmend)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16368/badge)](https://www.bestpractices.dev/projects/16368)
+[![FOSSA Status](https://github.com/argmend/argmend/actions/workflows/fossa.yml/badge.svg)](https://github.com/argmend/argmend/actions/workflows/fossa.yml)
 
 ## Install
 
