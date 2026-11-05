@@ -57,7 +57,7 @@ Pass a tool schema with `repair_args` when you have one. Blank input becomes `{}
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports go to [SECURITY.md](SECURITY.md). Questions go to [SUPPORT.md](SUPPORT.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). The repair passes are in [ARCHITECTURE.md](ARCHITECTURE.md). The plan is [ROADMAP.md](ROADMAP.md). Maintainer rules are [GOVERNANCE.md](GOVERNANCE.md). Security reports go to [SECURITY.md](SECURITY.md). Questions go to [SUPPORT.md](SUPPORT.md).
 
 ## License
 

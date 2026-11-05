@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.2.9"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: rp
+
+  release:
+    name: Publish release
+    needs: release-please
+    if: >-
+      always() && !failure() && !cancelled() &&
+      (needs.release-please.outputs.release_created == 'true' ||
+       (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name || inputs.tag }}
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: publisher
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ env.TAG }}
+          path: crate
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.95"
+      - name: Package, SBOM, and provenance
+        working-directory: crate
+        run: |
+          set -euo pipefail
+          cargo package --locked --allow-dirty
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --output-file sbom.cdx.json
+          crate_file=$(find target/package -name 'argmend-*.crate' -print -quit)
+          cp "$crate_file" "$GITHUB_WORKSPACE/argmend.crate"
+          cp sbom.cdx.json "$GITHUB_WORKSPACE/sbom.cdx.json"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest
+        with:
+          subject-path: |
+            argmend.crate
+            sbom.cdx.json
+      - name: Attach SBOM and provenance to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p attestation-bundles
+          for asset in argmend.crate sbom.cdx.json; do
+            tmpdir=$(mktemp -d)
+            pushd "$tmpdir" >/dev/null
+            if gh attestation download "$GITHUB_WORKSPACE/$asset" --repo "${{ github.repository }}"; then
+              for bundle in *.jsonl; do
+                [ -f "$bundle" ] || continue
+                cp "$bundle" "$GITHUB_WORKSPACE/attestation-bundles/${asset}.intoto.jsonl"
+                break
+              done
+            fi
+            popd >/dev/null
+            rm -rf "$tmpdir"
+          done
+          gh release upload "$TAG" \
+            "$GITHUB_WORKSPACE/argmend.crate" \
+            "$GITHUB_WORKSPACE/sbom.cdx.json" \
+            "$GITHUB_WORKSPACE"/attestation-bundles/*.intoto.jsonl \
+            --repo "${{ github.repository }}" \
+            --clobber
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish to crates.io
+        working-directory: crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: bash ../publisher/scripts/publish-crates.sh
