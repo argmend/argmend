@@ -84,7 +84,8 @@ pub enum RepairError {
 /// An unquoted drive path is one string.
 /// A sentence after one object or array is removed. A second JSON value stays
 /// unfixable. An extra `}` or `]` stays unfixable. A missing inner closer is
-/// inserted when the outer closer is present.
+/// inserted when the outer closer is present. A number that is the last
+/// character stays unfixable. Whitespace after that number closes the container.
 pub fn repair_json(raw: &str) -> RepairOutcome {
     match salvage_value(raw) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
@@ -1892,6 +1893,34 @@ mod tests {
             repair_json("{\"line\": 12"),
             RepairOutcome::Unfixable(_)
         ));
+        match repair_json("{\"a\": 12\n") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 12);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("number then newline -> {other:?}"),
+        }
+        match repair_json("{\"a\": 12 ") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 12);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.kind == RewriteKind::ClosedTruncation),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("number then space -> {other:?}"),
+        }
+        match repair_json("[1, 2\n") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value, json!([1, 2])),
+            other => panic!("array number then newline -> {other:?}"),
+        }
         assert!(matches!(
             repair_json("{\"a\": -1"),
             RepairOutcome::Unfixable(_)
