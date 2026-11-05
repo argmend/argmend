@@ -7,6 +7,7 @@ Argmend repairs broken tool-call arguments into JSON.
 [![docs.rs](https://img.shields.io/docsrs/argmend?logo=docs.rs)](https://docs.rs/argmend)
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](./LICENSE)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/argmend/argmend/badge)](https://securityscorecards.dev/viewer/?uri=github.com/argmend/argmend)
 
 ## Install
 
