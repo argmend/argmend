@@ -46,6 +46,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
+      actions: write
       attestations: write
       contents: write
       id-token: write
@@ -116,10 +117,17 @@ jobs:
             "$GITHUB_WORKSPACE"/attestation-bundles/*.intoto.jsonl \
             --repo "${{ github.repository }}" \
             --clobber
-      - id: auth
-        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      - name: Publish to crates.io
-        working-directory: crate
+      - name: Publish the crate
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: bash ../publisher/scripts/publish-crates.sh
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "FAIL: tag ${TAG} is not a release version"
+              exit 1
+              ;;
+          esac
+          gh workflow run publish-crates.yml --ref main -f "tag=${TAG}"
+          echo "OK: started publish-crates.yml for ${TAG}"
