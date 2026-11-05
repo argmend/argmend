@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "argmend-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+argmend = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "repair_json"
+path = "fuzz_targets/repair_json.rs"
+test = false
+doc = false
+bench = false

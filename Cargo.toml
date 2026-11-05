@@ -1,3 +1,7 @@
+[workspace]
+members = ["."]
+exclude = ["fuzz"]
+
 [package]
 name = "argmend"
 version = "0.2.8"

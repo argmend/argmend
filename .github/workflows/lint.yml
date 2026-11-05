@@ -1,0 +1,36 @@
+name: Workflow lint
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/zizmor.yml"
+      - ".github/workflows/lint.yml"
+  merge_group: {}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  workflow-sanity:
+    name: Workflow sanity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2
+        with:
+          tool: zizmor@1.16.0
+      - name: zizmor
+        run: zizmor --min-severity=high .github/workflows

@@ -30,4 +30,8 @@ Every commit needs a `Signed-off-by` line. `git commit -s` adds it from `git con
 
 ## Pull requests
 
-Describe the input, the old result, and the result you want. Add a test that failed before the change. Do not publish a crates.io release from a laptop. A version tag on `main` publishes the crate.
+Describe the input, the old result, and the result you want. Add a test that failed before the change. Pull request titles use a conventional prefix such as `fix:`, `feat:`, `docs:`, or `ci:`.
+
+Do not publish a crates.io release from a laptop. Release Please opens the release pull request. Merging that pull request tags the version, attaches the SBOM and provenance to the GitHub release, and publishes the crate.
+
+The fuzzer is `cargo +nightly fuzz run repair_json` from the repository root. CI runs it for 20 seconds when `src/` or `fuzz/` changes.
