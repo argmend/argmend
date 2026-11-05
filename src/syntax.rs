@@ -1509,15 +1509,28 @@ fn is_drive_path_body(body: &[char]) -> bool {
     true
 }
 
-/// `C:\new` continues. `Q:\nWhat` and `a:\b` do not.
+/// `C:\new` and `C:\n\file` continue. `Q:\nWhat`, `Q:\n\nWhat`, and `a:\b` do not.
 fn short_escape_continues_path(body: &[char], slash: usize) -> bool {
-    matches!(
-        body.get(slash + 2),
-        Some(ch)
-            if ch.is_ascii_lowercase()
-                || ch.is_ascii_digit()
-                || matches!(ch, '.' | '_' | '\\')
-    )
+    let mut at = slash;
+    loop {
+        match body.get(at + 2) {
+            Some('\\') => {
+                let next = at + 2;
+                if !is_short_escape(body, next) {
+                    return body
+                        .get(next + 1)
+                        .is_some_and(|ch| is_quoted_path_char(*ch));
+                }
+                at = next;
+            }
+            Some(ch)
+                if ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(*ch, '.' | '_') =>
+            {
+                return true;
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// A drive path that starts after other text. `C:\\` is already escaped
@@ -1552,8 +1565,8 @@ fn lone_drive_path_end(body: &[char], index: usize) -> Option<usize> {
     if body.get(index + 2) != Some(&'\\') || body.get(index + 3) == Some(&'\\') {
         return None;
     }
-    // `\n` after `Q:` is a newline. `\n` after `C:` is a path only when
-    // a filename continues, as in `C:\new`.
+    // `\n` after `Q:` is a newline, including `\n\n`. `\n` after `C:` is
+    // a path only when a filename continues, as in `C:\new` or `C:\n\file`.
     if is_short_escape(body, index + 2) && !short_escape_continues_path(body, index + 2) {
         return None;
     }
