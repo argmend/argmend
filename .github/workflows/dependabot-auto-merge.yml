@@ -3,12 +3,13 @@ name: Dependabot auto-merge
 # This job does not check out the pull request. It only approves Dependabot.
 on: # zizmor: ignore[dangerous-triggers]
   pull_request_target:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  group: dependabot-auto-merge-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -21,6 +22,9 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
       - name: Fetch Dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
@@ -47,16 +51,32 @@ jobs:
           fi
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
-      - name: Approve and enable auto-merge
+      - name: Approve
         if: >-
           steps.metadata.outputs.update-type != 'version-update:semver-major' ||
           steps.sha-pin.outputs.sha == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr review --approve "$PR_URL"
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        if: >-
+          steps.metadata.outputs.update-type != 'version-update:semver-major' ||
+          steps.sha-pin.outputs.sha == 'true'
+        id: app-token
+        with:
+          client-id: ${{ vars.AUTO_APPROVE_CLIENT_ID }}
+          private-key: ${{ secrets.AUTO_APPROVE_PRIVATE_KEY }}
+      - name: Enable auto-merge
+        if: >-
+          steps.metadata.outputs.update-type != 'version-update:semver-major' ||
+          steps.sha-pin.outputs.sha == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          gh pr review --approve "$PR_URL"
-          gh pr merge --auto --squash "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL" \
+            || echo "Could not enable auto-merge. The pull request was approved."
 
       - name: Skip a real major update
         if: >-
