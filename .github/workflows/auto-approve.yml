@@ -25,7 +25,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
-      (github.actor == 'SebTardif' || github.actor == 'argmend-release[bot]')
+      (github.actor == 'SebTardif' || github.event.pull_request.user.login == 'argmend-release[bot]')
     steps:
       - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
         with:
