@@ -74,10 +74,17 @@ jobs:
           set -euo pipefail
           cargo package --locked --allow-dirty
           cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo cyclonedx --format json --override-filename sbom.cdx.json
+          cargo cyclonedx --format json
           crate_file=$(find target/package -name 'argmend-*.crate' -print -quit)
+          sbom=$(find . -name '*.cdx.json' -print -quit)
+          if [ -z "$crate_file" ] || [ -z "$sbom" ]; then
+            echo "FAIL: crate=${crate_file:-missing} sbom=${sbom:-missing}"
+            find . -name '*.json' -o -name '*.crate' | head
+            exit 1
+          fi
+          echo "OK: crate ${crate_file} sbom ${sbom}"
           cp "$crate_file" "$GITHUB_WORKSPACE/argmend.crate"
-          cp sbom.cdx.json "$GITHUB_WORKSPACE/sbom.cdx.json"
+          cp "$sbom" "$GITHUB_WORKSPACE/sbom.cdx.json"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         id: attest
         with:
