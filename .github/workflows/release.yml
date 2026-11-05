@@ -74,7 +74,7 @@ jobs:
           set -euo pipefail
           cargo package --locked --allow-dirty
           cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo cyclonedx --format json --output-file sbom.cdx.json
+          cargo cyclonedx --format json --override-filename sbom.cdx.json
           crate_file=$(find target/package -name 'argmend-*.crate' -print -quit)
           cp "$crate_file" "$GITHUB_WORKSPACE/argmend.crate"
           cp sbom.cdx.json "$GITHUB_WORKSPACE/sbom.cdx.json"
