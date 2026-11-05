@@ -756,11 +756,20 @@ fn path_backslash_only(before: &Value, after: &Value) -> bool {
 }
 
 /// `after` is `before` with only tab, newline, CR, form feed, and
-/// backspace expanded to a backslash plus that letter.
+/// backspace expanded to a backslash plus that letter. The expanded
+/// controls sit on a drive path or a UNC path, including a path that
+/// starts after other text.
 fn windows_short_escape_restored(before: &str, after: &str) -> bool {
-    if !looks_like_windows_path(after) {
+    if before == after {
         return false;
     }
+    if looks_like_windows_path(after) && controls_expanded(before) == after {
+        return true;
+    }
+    embedded_controls_only(before, after)
+}
+
+fn controls_expanded(before: &str) -> String {
     let mut restored = String::new();
     for ch in before.chars() {
         match ch {
@@ -772,7 +781,111 @@ fn windows_short_escape_restored(before: &str, after: &str) -> bool {
             other => restored.push(other),
         }
     }
-    restored == after && restored != before
+    restored
+}
+
+fn embedded_controls_only(before: &str, after: &str) -> bool {
+    let after_chars: Vec<char> = after.chars().collect();
+    let mask = drive_value_mask(&after_chars);
+    if !mask.iter().any(|on_path| *on_path) {
+        return false;
+    }
+    let mut after_chars = after_chars.into_iter().enumerate();
+    let mut changed = false;
+    for before_char in before.chars() {
+        let Some((index, after_char)) = after_chars.next() else {
+            return false;
+        };
+        if before_char == after_char {
+            continue;
+        }
+        let letter = match before_char {
+            '\u{0008}' => 'b',
+            '\u{000c}' => 'f',
+            '\n' => 'n',
+            '\r' => 'r',
+            '\t' => 't',
+            _ => return false,
+        };
+        if after_char != '\\' || !mask[index] {
+            return false;
+        }
+        let Some((_, next)) = after_chars.next() else {
+            return false;
+        };
+        if next != letter {
+            return false;
+        }
+        changed = true;
+    }
+    after_chars.next().is_none() && changed
+}
+
+/// Same characters as `is_quoted_path_char`. A drive path in the repaired
+/// value uses a real backslash, not the source's escape letter.
+fn drive_value_mask(body: &[char]) -> Vec<bool> {
+    let mut mask = vec![false; body.len()];
+    let mut index = 0;
+    while index < body.len() {
+        if let Some(end) = drive_value_end(body, index) {
+            for slot in &mut mask[index..end] {
+                *slot = true;
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    mask
+}
+
+fn drive_value_end(body: &[char], index: usize) -> Option<usize> {
+    if index > 0 && (body[index - 1].is_ascii_alphanumeric() || body[index - 1] == '_') {
+        return None;
+    }
+    let letter = body.get(index).copied()?;
+    if !letter.is_ascii_alphabetic() || body.get(index + 1) != Some(&':') {
+        return None;
+    }
+    if body.get(index + 2) != Some(&'\\') && body.get(index + 2) != Some(&'/') {
+        return None;
+    }
+    let mut end = index + 3;
+    while end < body.len() && quoted_path_char(body[end]) {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn quoted_path_char(ch: char) -> bool {
+    ch.is_alphanumeric()
+        || matches!(
+            ch,
+            ' ' | '\\'
+                | '/'
+                | ':'
+                | '.'
+                | '-'
+                | '_'
+                | '~'
+                | '$'
+                | '('
+                | ')'
+                | '+'
+                | '='
+                | '&'
+                | '@'
+                | '#'
+                | '%'
+                | '\''
+                | ','
+                | ';'
+                | '!'
+                | '?'
+                | '*'
+                | '['
+                | ']'
+        )
 }
 
 fn looks_like_windows_path(text: &str) -> bool {
@@ -804,6 +917,14 @@ fn path_round_trip_only_restores_short_escapes() {
     assert!(!path_backslash_only(
         &json!({"note": "a\tb"}),
         &json!({"note": "a\\tb"})
+    ));
+    assert!(path_backslash_only(
+        &json!({"note": "save it at C:\temp"}),
+        &json!({"note": "save it at C:\\temp"})
+    ));
+    assert!(!path_backslash_only(
+        &json!({"note": "save it at home\t"}),
+        &json!({"note": "save it at home\\t"})
     ));
     let controls = format!("C:{}\r\u{000c}\u{0008}x", '\n');
     let expanded = "C:\\n\\r\\f\\bx";

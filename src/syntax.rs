@@ -18,8 +18,8 @@ use super::{RepairError, RepairOutcome, Rewrite, RewriteKind};
 ///    boundary. An unclosed `/*` stays. A mark glued to a bare word stays.
 /// 3. Replace single quotes with double quotes.
 /// 4. Replace curly double quotes that wrap a token.
-/// 5. Keep a Windows-path backslash, and keep a backslash JSON does not
-///    treat as an escape.
+/// 5. Keep a Windows-path backslash, including one inside a sentence, and
+///    keep a backslash JSON does not treat as an escape.
 /// 6. Escape raw controls inside strings.
 /// 7. Strip a unary `+` before a number.
 /// 8. Strip `_` between digits in a number, not inside a name.
@@ -1258,9 +1258,10 @@ pub(crate) struct BackslashPass {
 
 /// Keep a backslash that a Windows path wrote as a JSON escape.
 ///
-/// `C:\temp` is the six characters `C:\temp`. `\n` in a string that is
-/// not a path stays a newline. A `\\` pair stays one backslash. An
-/// escape JSON does not recognize, such as `\U`, stays a backslash.
+/// `C:\temp` is the six characters `C:\temp`, including when that path
+/// sits inside a sentence. `\n` in a string that is not on a drive path
+/// stays a newline. A `\\` pair stays one backslash. An escape JSON does
+/// not recognize, such as `\U`, stays a backslash.
 pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     if !raw.contains('\\') {
         return BackslashPass {
@@ -1282,15 +1283,16 @@ pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
         let (end, body) = take_string_body(&chars, index);
         let rewritten = rewrite_string_body(&body);
         let original: String = body.iter().collect();
-        if rewritten != original {
-            if is_drive_path_body(&body) || is_unc_literal(&body) {
+        if rewritten.text != original {
+            if rewritten.kept_path {
                 kept_path = true;
-            } else {
+            }
+            if rewritten.kept_invalid || !rewritten.kept_path {
                 kept_invalid = true;
             }
         }
         out.push('"');
-        out.push_str(&rewritten);
+        out.push_str(&rewritten.text);
         if end < chars.len() && chars[end] == '"' {
             out.push('"');
             index = end + 1;
@@ -1408,13 +1410,32 @@ fn structural_after(chars: &[char], mut index: usize) -> bool {
     index >= chars.len() || matches!(chars[index], ',' | '}' | ']' | ':')
 }
 
-fn rewrite_string_body(body: &[char]) -> String {
+struct StringBodyRewrite {
+    text: String,
+    kept_path: bool,
+    kept_invalid: bool,
+}
+
+fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
     if is_unc_literal(body) {
-        return double_every_backslash(body);
+        let text = double_every_backslash(body);
+        let original: String = body.iter().collect();
+        return StringBodyRewrite {
+            kept_path: text != original,
+            kept_invalid: false,
+            text,
+        };
     }
-    let path = is_drive_path_body(body);
+    let whole_path = is_drive_path_body(body);
+    let mask = if whole_path {
+        Vec::new()
+    } else {
+        embedded_drive_mask(body)
+    };
     let mut out = String::with_capacity(body.len() + 8);
     let mut index = 0;
+    let mut kept_path = false;
+    let mut kept_invalid = false;
     while index < body.len() {
         if body[index] != '\\' {
             out.push(body[index]);
@@ -1438,7 +1459,8 @@ fn rewrite_string_body(body: &[char]) -> String {
             index += 2;
             continue;
         }
-        if !path && is_short_escape(body, index) {
+        let in_path = whole_path || mask.get(index).copied().unwrap_or(false);
+        if !in_path && is_short_escape(body, index) {
             out.push('\\');
             out.push(body[index + 1]);
             index += 2;
@@ -1446,9 +1468,18 @@ fn rewrite_string_body(body: &[char]) -> String {
         }
         out.push('\\');
         out.push('\\');
+        if in_path {
+            kept_path = true;
+        } else {
+            kept_invalid = true;
+        }
         index += 1;
     }
-    out
+    StringBodyRewrite {
+        text: out,
+        kept_path,
+        kept_invalid,
+    }
 }
 
 fn double_every_backslash(body: &[char]) -> String {
@@ -1469,6 +1500,45 @@ fn is_drive_path_body(body: &[char]) -> bool {
         && body[1] == ':'
         && (body[2] == '\\' || body[2] == '/')
         && body.iter().copied().all(is_quoted_path_char)
+}
+
+/// A drive path that starts after other text. `C:\\` is already escaped
+/// and is not a start. The run stops at the first character a path
+/// cannot contain.
+fn embedded_drive_mask(body: &[char]) -> Vec<bool> {
+    let mut mask = vec![false; body.len()];
+    let mut index = 0;
+    while index < body.len() {
+        if let Some(end) = lone_drive_path_end(body, index) {
+            for slot in &mut mask[index..end] {
+                *slot = true;
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    mask
+}
+
+fn lone_drive_path_end(body: &[char], index: usize) -> Option<usize> {
+    if preceded_by_ident(body, index) {
+        return None;
+    }
+    let letter = body.get(index).copied()?;
+    if !letter.is_ascii_alphabetic() || body.get(index + 1) != Some(&':') {
+        return None;
+    }
+    // A forward slash is already one character. Only a single
+    // backslash can be a JSON escape that still belongs to the path.
+    if body.get(index + 2) != Some(&'\\') || body.get(index + 3) == Some(&'\\') {
+        return None;
+    }
+    let mut end = index + 3;
+    while end < body.len() && is_quoted_path_char(body[end]) {
+        end += 1;
+    }
+    Some(end)
 }
 
 /// `\\server\share` as the model wrote it, with a backslash that is not
@@ -1533,6 +1603,11 @@ fn is_quoted_path_char(ch: char) -> bool {
                 | '\''
                 | ','
                 | ';'
+                | '!'
+                | '?'
+                | '*'
+                | '['
+                | ']'
         )
 }
 
@@ -1693,6 +1768,10 @@ fn is_unquoted_path_char(ch: char) -> bool {
                 | '#'
                 | '%'
                 | '\''
+                | '!'
+                | '?'
+                | '*'
+                | '['
         )
 }
 
