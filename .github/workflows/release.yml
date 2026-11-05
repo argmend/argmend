@@ -46,6 +46,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
+      actions: write
       attestations: write
       contents: write
       id-token: write
@@ -116,3 +117,17 @@ jobs:
             "$GITHUB_WORKSPACE"/attestation-bundles/*.intoto.jsonl \
             --repo "${{ github.repository }}" \
             --clobber
+      - name: Publish the crate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "FAIL: tag ${TAG} is not a release version"
+              exit 1
+              ;;
+          esac
+          gh workflow run publish-crates.yml --ref main -f "tag=${TAG}"
+          echo "OK: started publish-crates.yml for ${TAG}"
