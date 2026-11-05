@@ -25,6 +25,9 @@ jobs:
       id-token: write
       security-events: write
     steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -38,6 +41,38 @@ jobs:
           name: scorecard-sarif
           path: results.sarif
           retention-days: 5
+
+  report-failure:
+    name: Report Scorecard failure
+    needs: analysis
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open or close the failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ASSIGNEE: ${{ vars.NIGHTLY_FAILURE_ASSIGNEE || 'SebTardif' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_RESULTS: analysis=${{ needs.analysis.result }}
+        run: |
+          python3 scripts/report-scheduled-failure.py \
+            --prefix "Scorecard red" \
+            --run-id "$RUN_ID" \
+            --run-url "$RUN_URL" \
+            --label nightly-failure \
+            --label ready
       - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: results.sarif

@@ -65,3 +65,35 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: high
+
+  report-failure:
+    name: Report CodeQL failure
+    needs: codeql
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open or close the failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ASSIGNEE: ${{ vars.NIGHTLY_FAILURE_ASSIGNEE || 'SebTardif' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_RESULTS: codeql=${{ needs.codeql.result }}
+        run: |
+          python3 scripts/report-scheduled-failure.py \
+            --prefix "CodeQL red" \
+            --run-id "$RUN_ID" \
+            --run-url "$RUN_URL" \
+            --label nightly-failure \
+            --label ready
