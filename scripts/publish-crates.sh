@@ -2,6 +2,10 @@
 # Publish this tree's argmend version when crates.io does not have it yet.
 set -euo pipefail
 
+if [ "$#" -eq 0 ]; then
+  set -- cargo publish --locked
+fi
+
 echo "PLAN: publish argmend from $(pwd)"
 if [ ! -f Cargo.toml ]; then
   echo "FAIL: Cargo.toml is missing"
@@ -61,10 +65,10 @@ if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
   exit 1
 fi
 
-echo "DO: cargo publish --locked"
+echo "DO: $*"
 log=$(mktemp)
 set +e
-cargo publish --locked >"$log" 2>&1
+"$@" >"$log" 2>&1
 status=$?
 set -e
 cat "$log"
