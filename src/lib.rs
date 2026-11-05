@@ -80,6 +80,7 @@ pub enum RepairError {
 /// A repeated XML parameter name is [`RepairOutcome::Ambiguous`].
 /// An unescaped quote inside a string is Ambiguous too.
 /// A Windows path keeps its backslashes, including one inside a sentence.
+/// A JSON escape after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays that escape.
 /// An unquoted drive path is one string.
 /// A sentence after one object or array is removed. A second JSON value stays
 /// unfixable. An extra `}` or `]` stays unfixable. A missing inner closer is
@@ -2342,6 +2343,7 @@ mod tests {
         one_path(r#"{"path": "C:\new"}"#, "path", "C:\\new");
         one_path(r#"{"path": "C:\form"}"#, "path", "C:\\form");
         one_path(r#"{"path": "C:\return"}"#, "path", "C:\\return");
+        one_path(r#"{"path": "C:\n\file"}"#, "path", "C:\\n\\file");
         one_path(r#"{path: 'C:\temp'}"#, "path", "C:\\temp");
         one_path(r#"{"path": "C:\users\sebta"}"#, "path", "C:\\users\\sebta");
         one_path(
@@ -2541,6 +2543,24 @@ mod tests {
         match repair_json(r#"{"msg": "line\nbreak"}"#) {
             RepairOutcome::Valid(value) => assert_eq!(value["msg"], "line\nbreak"),
             other => panic!("real newline -> {other:?}"),
+        }
+        match repair_json(r#"{"prompt":"Q:\nWhat is it?\nA:\nIt is."}"#) {
+            RepairOutcome::Valid(value) => {
+                assert_eq!(value["prompt"], "Q:\nWhat is it?\nA:\nIt is.");
+            }
+            other => panic!("one-letter label before a newline -> {other:?}"),
+        }
+        match repair_json(r#"{"note":"Plan B:\n- step"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["note"], "Plan B:\n- step"),
+            other => panic!("label before a newline and a dash -> {other:?}"),
+        }
+        match repair_json(r#"{"note":"key a:\b"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["note"], "key a:\u{0008}"),
+            other => panic!("one-letter label before a backspace -> {other:?}"),
+        }
+        match repair_json(r#"{"prompt":"Q:\n\nWhat"}"#) {
+            RepairOutcome::Valid(value) => assert_eq!(value["prompt"], "Q:\n\nWhat"),
+            other => panic!("blank line after a one-letter label -> {other:?}"),
         }
         match repair_json(r#"{"note": "save it at C:\\temp\nhome"}"#) {
             RepairOutcome::Valid(value) => {

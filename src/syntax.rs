@@ -1495,11 +1495,42 @@ fn double_every_backslash(body: &[char]) -> String {
 }
 
 fn is_drive_path_body(body: &[char]) -> bool {
-    body.len() >= 3
-        && body[0].is_ascii_alphabetic()
-        && body[1] == ':'
-        && (body[2] == '\\' || body[2] == '/')
-        && body.iter().copied().all(is_quoted_path_char)
+    if body.len() < 3
+        || !body[0].is_ascii_alphabetic()
+        || body[1] != ':'
+        || (body[2] != '\\' && body[2] != '/')
+        || !body.iter().copied().all(is_quoted_path_char)
+    {
+        return false;
+    }
+    if body[2] == '\\' && is_short_escape(body, 2) && !short_escape_continues_path(body, 2) {
+        return false;
+    }
+    true
+}
+
+/// `C:\new` and `C:\n\file` continue. `Q:\nWhat`, `Q:\n\nWhat`, and `a:\b` do not.
+fn short_escape_continues_path(body: &[char], slash: usize) -> bool {
+    let mut at = slash;
+    loop {
+        match body.get(at + 2) {
+            Some('\\') => {
+                let next = at + 2;
+                if !is_short_escape(body, next) {
+                    return body
+                        .get(next + 1)
+                        .is_some_and(|ch| is_quoted_path_char(*ch));
+                }
+                at = next;
+            }
+            Some(ch)
+                if ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(*ch, '.' | '_') =>
+            {
+                return true;
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// A drive path that starts after other text. `C:\\` is already escaped
@@ -1532,6 +1563,11 @@ fn lone_drive_path_end(body: &[char], index: usize) -> Option<usize> {
     // A forward slash is already one character. Only a single
     // backslash can be a JSON escape that still belongs to the path.
     if body.get(index + 2) != Some(&'\\') || body.get(index + 3) == Some(&'\\') {
+        return None;
+    }
+    // `\n` after `Q:` is a newline, including `\n\n`. `\n` after `C:` is
+    // a path only when a filename continues, as in `C:\new` or `C:\n\file`.
+    if is_short_escape(body, index + 2) && !short_escape_continues_path(body, index + 2) {
         return None;
     }
     let mut end = index + 3;

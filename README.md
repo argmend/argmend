@@ -45,7 +45,7 @@ That program is [examples/repair.rs](examples/repair.rs). Run it with:
 cargo run --example repair
 ```
 
-`Valid` means the text parsed and Argmend did not rewrite it. `Repaired` means Argmend rewrote the text and then parsed it. A Windows path whose backslash was a JSON escape is one of those rewrites. `Unfixable` means Argmend could not produce one JSON value. `Ambiguous` means more than one repair was possible, so none was chosen.
+`Valid` means the text parsed and Argmend did not rewrite it. `Repaired` means Argmend rewrote the text and then parsed it. A Windows path whose backslash was a JSON escape is one of those rewrites. A newline after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays a newline. `Unfixable` means Argmend could not produce one JSON value. `Ambiguous` means more than one repair was possible, so none was chosen.
 
 Pass a tool schema with `repair_args` when you have one. Blank input becomes `{}`, `[]`, or null, matching the schema type. A string, number, or boolean is not invented.
 
