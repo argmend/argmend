@@ -5730,6 +5730,61 @@ mod tests {
     }
 
     #[test]
+    fn normalize_stops_past_the_depth_limit() {
+        fn nest_arrays(levels: usize) -> Value {
+            let mut value = Value::Array(Vec::new());
+            for _ in 1..levels {
+                value = Value::Array(vec![value]);
+            }
+            value
+        }
+        fn nest_objects(levels: usize) -> Value {
+            let mut value = Value::Object(serde_json::Map::new());
+            for _ in 1..levels {
+                let mut map = serde_json::Map::new();
+                map.insert("a".to_string(), value);
+                value = Value::Object(map);
+            }
+            value
+        }
+
+        let limit = schema::NORMALIZE_DEPTH_LIMIT;
+        let array_schema = json!({"type": "array"});
+        let at_limit = normalize(&nest_arrays(limit), &array_schema).expect("array at the limit");
+        assert!(at_limit.value.is_array());
+        let mut leaf = json!(1);
+        for _ in 0..limit {
+            leaf = Value::Array(vec![leaf]);
+        }
+        let kept = normalize(&leaf, &array_schema).expect("number inside the limit");
+        assert!(kept.value.is_array());
+        let err =
+            normalize(&nest_arrays(limit + 1), &array_schema).expect_err("array past the limit");
+        assert!(err.to_string().contains("nested too deeply"), "{err}");
+
+        let object_schema = json!({"type": "object"});
+        let err =
+            normalize(&nest_objects(limit + 1), &object_schema).expect_err("object past the limit");
+        assert!(err.to_string().contains("nested too deeply"), "{err}");
+
+        let mut raw = String::new();
+        for _ in 0..(limit + 8) {
+            raw.push('[');
+        }
+        raw.push('1');
+        for _ in 0..(limit + 8) {
+            raw.push(']');
+        }
+        let err = repair_args(&RepairRequest {
+            tool_name: "deep",
+            raw: &raw,
+            schema: Some(&array_schema),
+        })
+        .expect_err("repair_args past the parse limit");
+        assert!(matches!(err, RepairError::Unfixable(_)), "{err:?}");
+    }
+
+    #[test]
     fn later_array_element_still_rejects_a_coercion() {
         let prefix = json!({
             "type": "array",

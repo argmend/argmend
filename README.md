@@ -47,7 +47,7 @@ cargo run --example repair
 
 `Valid` means the text parsed and Argmend did not rewrite it. `Repaired` means Argmend rewrote the text and then parsed it. A Windows path whose backslash was a JSON escape is one of those rewrites. A newline after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays a newline. A number that is the last character, such as `{"a": 12`, stays unfixable. The same number followed by a space or a newline is closed. `Unfixable` means Argmend could not produce one JSON value. `Ambiguous` means more than one repair was possible, so none was chosen.
 
-Pass a tool schema with `repair_args` when you have one. A `parameters` object is that schema when the outer object has no `properties` map, and `if`, `then`, `not`, and `oneOf` on it still apply. Blank input becomes `{}`, `[]`, or null, matching the schema type. A string, number, or boolean is not invented.
+Pass a tool schema with `repair_args` when you have one. A value nested more than 128 arrays or objects is an error. `repair_args` uses that same limit. A `parameters` object is that schema when the outer object has no `properties` map, and `if`, `then`, `not`, and `oneOf` on it still apply. Blank input becomes `{}`, `[]`, or null, matching the schema type. A string, number, or boolean is not invented.
 
 ## What success does not mean
 

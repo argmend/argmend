@@ -14,6 +14,10 @@ use crate::{RepairError, Repaired, Rewrite, RewriteKind};
 
 const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name"];
 
+/// Arrays and objects nested deeper than this are refused.
+/// `serde_json` uses the same number when it parses a string.
+pub(crate) const NORMALIZE_DEPTH_LIMIT: usize = 128;
+
 /// Apply a tool schema to an already-parsed value.
 ///
 /// `Ok` means this crate produced a value. It does not mean the schema
@@ -29,6 +33,10 @@ const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name
 /// When this object has no `properties` map, a `parameters` object is the
 /// schema. `if` / `then`, `not`, and `oneOf` on that inner object still apply.
 ///
+/// An array or object nested more than 128 levels returns an error
+/// (`value is nested too deeply`). [`crate::repair_args`] calls this
+/// function, so it shares that limit.
+///
 /// `unevaluatedProperties: false` keeps a property that `allOf`, `anyOf`,
 /// `oneOf`, `if` / `then` / `else`, or a dependent schema evaluated.
 /// `additionalProperties: false` does not look inside those branches. A key
@@ -38,6 +46,9 @@ const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name
 /// `$dynamicRef` on this object, or on one of those branches, blocks
 /// dropping a key. The ref is not resolved.
 pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError> {
+    if nested_too_deeply(value) {
+        return Err(RepairError::Unfixable("value is nested too deeply".into()));
+    }
     let (next, rewrites) = normalize_child(value, schema)?;
     Ok(Repaired {
         value: next,
@@ -2223,6 +2234,34 @@ fn unknown_denial(schema: &Value) -> Option<&'static str> {
         return Some("unevaluatedProperties is false");
     }
     None
+}
+
+/// Heap walk. A recursive `Value` clone overflows the stack before this returns.
+fn nested_too_deeply(value: &Value) -> bool {
+    let mut stack = vec![(value, 1usize)];
+    while let Some((current, depth)) = stack.pop() {
+        if depth > NORMALIZE_DEPTH_LIMIT {
+            return true;
+        }
+        let children: &[Value] = match current {
+            Value::Array(items) => items,
+            Value::Object(map) => {
+                for child in map.values() {
+                    if child.is_array() || child.is_object() {
+                        stack.push((child, depth + 1));
+                    }
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        for item in children {
+            if item.is_array() || item.is_object() {
+                stack.push((item, depth + 1));
+            }
+        }
+    }
+    false
 }
 
 fn schema_view(schema: &Value) -> &Value {
