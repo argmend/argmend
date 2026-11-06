@@ -19,7 +19,7 @@ mod syntax;
 
 use serde_json::Value;
 
-pub use schema::normalize;
+pub use schema::{normalize, tool_schema};
 
 /// Result of [`repair_json`].
 ///
@@ -362,6 +362,7 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
     let Some(schema) = schema else {
         return Ok(Value::Object(serde_json::Map::new()));
     };
+    let schema = schema::resolve_schema(schema)?;
     let types = schema_types(schema);
     if types.is_empty() {
         return Ok(Value::Object(serde_json::Map::new()));
@@ -399,6 +400,11 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 /// [`RepairRequest::new`] keeps path backslashes, alias renames, and
 /// truncation closing on. [`RepairRequest::with_options`] turns one of
 /// those families off. The other repairs still run.
+///
+/// An OpenAI tool (`function.parameters` or `type: function` with
+/// `parameters`), an Anthropic `input_schema`, or an MCP `inputSchema`
+/// is the JSON Schema. A tool shape with no object schema is unfixable.
+/// Any other object is still the schema itself.
 ///
 /// ```
 /// use argmend::{repair_args, RepairRequest};
@@ -6014,6 +6020,114 @@ mod tests {
         });
         let repaired = normalize(&json!("9"), &disagree).expect("one side accepts");
         assert_eq!(repaired.value, 9);
+    }
+
+    #[test]
+    fn provider_tool_definitions_coerce_a_typed_field() {
+        let bare = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}}
+        });
+        let refused = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "if": {"type": "object"},
+            "then": {"properties": {"a": {"maximum": 0}}}
+        });
+        let raw = r#"{"a":"1"}"#;
+        let shapes = [
+            (
+                json!({"type": "function", "function": {"name": "t", "parameters": bare}}),
+                json!({"type": "function", "function": {"name": "t", "parameters": refused}}),
+            ),
+            (
+                json!({"name": "t", "input_schema": bare}),
+                json!({"name": "t", "input_schema": refused}),
+            ),
+            (
+                json!({"name": "t", "inputSchema": bare}),
+                json!({"name": "t", "inputSchema": refused}),
+            ),
+        ];
+        for (shape, refusal) in &shapes {
+            let repaired = repair_args(&RepairRequest::new("t", raw, Some(shape))).expect("coerce");
+            assert_eq!(repaired.value["a"], 1, "{shape}");
+            let err = normalize(&json!({"a": "5"}), refusal).expect_err("then maximum");
+            assert!(
+                err.to_string().contains("outside the schema bounds"),
+                "{refusal} {err}"
+            );
+        }
+        let not_schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "not": {"properties": {"a": {"const": 5}}}
+        });
+        let one = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "oneOf": [{"properties": {"a": {"maximum": 0}}}]
+        });
+        for (schema, needle) in [
+            (not_schema, "excluded by not"),
+            (one, "outside the schema bounds"),
+        ] {
+            let wrappers = [
+                json!({"type": "function", "function": {"name": "t", "parameters": schema}}),
+                json!({"name": "t", "input_schema": schema}),
+                json!({"name": "t", "inputSchema": schema}),
+            ];
+            for wrapper in &wrappers {
+                let err = normalize(&json!({"a": "5"}), wrapper).expect_err("applicator");
+                let text = err.to_string();
+                assert!(text.contains(needle), "{wrapper} {text}");
+            }
+        }
+
+        let decoy = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "function": {"parameters": {"type": "string"}},
+            "input_schema": {"type": "string"},
+            "inputSchema": {"type": "string"}
+        });
+        let repaired = repair_args(&RepairRequest::new("t", raw, Some(&decoy))).expect("decoy");
+        assert_eq!(repaired.value["a"], 1);
+        assert!(
+            tool_schema(&decoy)
+                .expect("schema with extra keys")
+                .is_none()
+        );
+
+        let plain = json!({"type": "object", "properties": {"a": {"type": "integer"}}});
+        let repaired = repair_args(&RepairRequest::new("t", raw, Some(&plain))).expect("plain");
+        assert_eq!(repaired.value["a"], 1);
+        assert!(tool_schema(&plain).expect("plain schema").is_none());
+
+        let blank = json!({"type": "function", "parameters": {"type": "object"}});
+        let repaired = repair_args(&RepairRequest::new("t", "  ", Some(&blank))).expect("blank");
+        assert_eq!(repaired.value, json!({}));
+
+        let missing = json!({"type": "function", "function": {"name": "t"}});
+        let err = repair_args(&RepairRequest::new("t", "{}", Some(&missing))).expect_err("openai");
+        assert!(
+            err.to_string()
+                .contains("unrecognized OpenAI tool definition"),
+            "{err}"
+        );
+        let bad_anthropic = json!({"name": "t", "input_schema": "nope"});
+        let err = tool_schema(&bad_anthropic).expect_err("anthropic");
+        assert!(
+            err.to_string()
+                .contains("unrecognized Anthropic tool definition"),
+            "{err}"
+        );
+        let bad_mcp = json!({"name": "t", "inputSchema": []});
+        let err = tool_schema(&bad_mcp).expect_err("mcp");
+        assert!(
+            err.to_string().contains("unrecognized MCP tool definition"),
+            "{err}"
+        );
     }
 
     #[test]

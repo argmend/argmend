@@ -60,6 +60,7 @@ pub(crate) fn normalize_with(
     if nested_too_deeply(value) {
         return Err(RepairError::Unfixable("value is nested too deeply".into()));
     }
+    let schema = resolve_schema(schema)?;
     let (next, rewrites) = normalize_child(value, schema, options)?;
     Ok(Repaired {
         value: next,
@@ -2306,6 +2307,69 @@ fn nested_too_deeply(value: &Value) -> bool {
         }
     }
     false
+}
+
+/// JSON Schema stored on an OpenAI, Anthropic, or MCP tool definition.
+///
+/// `Ok(None)` means `definition` is not one of those shapes, so callers
+/// keep using it as a JSON Schema. A tool shape whose schema is missing
+/// or not an object is an error.
+pub fn tool_schema(definition: &Value) -> Result<Option<&Value>, RepairError> {
+    let Some(map) = definition.as_object() else {
+        return Ok(None);
+    };
+    // A JSON Schema that happens to contain one of these keys stays the
+    // schema. `type: function` is not a JSON Schema type, so an OpenAI
+    // tool still extracts.
+    if looks_like_json_schema(definition) {
+        return Ok(None);
+    }
+    if let Some(function) = map.get("function")
+        && let Some(params) = function.as_object().and_then(|item| item.get("parameters"))
+    {
+        return object_schema(params, "unrecognized OpenAI tool definition");
+    }
+    if map.get("type").and_then(Value::as_str) == Some("function") {
+        return match map.get("parameters") {
+            Some(params) => object_schema(params, "unrecognized OpenAI tool definition"),
+            None => Err(RepairError::Unfixable(
+                "unrecognized OpenAI tool definition".into(),
+            )),
+        };
+    }
+    if let Some(slot) = map.get("input_schema") {
+        return object_schema(slot, "unrecognized Anthropic tool definition");
+    }
+    if let Some(slot) = map.get("inputSchema") {
+        return object_schema(slot, "unrecognized MCP tool definition");
+    }
+    Ok(None)
+}
+
+fn object_schema<'a>(slot: &'a Value, message: &str) -> Result<Option<&'a Value>, RepairError> {
+    if slot.is_object() {
+        Ok(Some(slot))
+    } else {
+        Err(RepairError::Unfixable(message.into()))
+    }
+}
+
+fn looks_like_json_schema(schema: &Value) -> bool {
+    if schema.get("properties").is_some() {
+        return true;
+    }
+    match schema.get("type") {
+        Some(Value::String(kind)) => matches!(
+            kind.as_str(),
+            "object" | "array" | "string" | "number" | "integer" | "boolean" | "null"
+        ),
+        Some(Value::Array(_)) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn resolve_schema(schema: &Value) -> Result<&Value, RepairError> {
+    Ok(tool_schema(schema)?.unwrap_or(schema))
 }
 
 fn schema_view(schema: &Value) -> &Value {
