@@ -5676,6 +5676,60 @@ mod tests {
     }
 
     #[test]
+    fn parameters_wrapper_keeps_if_not_and_one_of() {
+        let input = json!({"a": "5"});
+
+        fn same_refusal(input: &Value, bare: Value, phrase: &str) {
+            let err = normalize(input, &bare).expect_err("bare schema");
+            assert!(err.to_string().contains(phrase), "bare {err}");
+            let wrapped = json!({"name": "t", "parameters": bare});
+            let err = normalize(input, &wrapped).expect_err("parameters wrapper");
+            assert!(err.to_string().contains(phrase), "wrapped {err}");
+        }
+
+        same_refusal(
+            &input,
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "integer"}},
+                "if": {"type": "object"},
+                "then": {"properties": {"a": {"maximum": 0}}}
+            }),
+            "outside the schema bounds",
+        );
+        same_refusal(
+            &input,
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "integer"}},
+                "not": {"properties": {"a": {"const": 5}}}
+            }),
+            "excluded by not",
+        );
+        same_refusal(
+            &input,
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "integer"}},
+                "oneOf": [{"properties": {"a": {"maximum": 0}}}]
+            }),
+            "outside the schema bounds",
+        );
+
+        let allowed = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer"}},
+            "then": {"properties": {"a": {"maximum": 10}}},
+            "if": {"type": "object"}
+        });
+        let repaired = normalize(&input, &allowed).expect("bare inside the bound");
+        assert_eq!(repaired.value["a"], 5);
+        let wrapped = json!({"name": "t", "parameters": allowed});
+        let repaired = normalize(&input, &wrapped).expect("wrapped inside the bound");
+        assert_eq!(repaired.value["a"], 5);
+    }
+
+    #[test]
     fn later_array_element_still_rejects_a_coercion() {
         let prefix = json!({
             "type": "array",
