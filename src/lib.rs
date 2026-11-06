@@ -8,6 +8,8 @@
 //! with [`RepairRequest::new`] so a new field is not required.
 //! [`RepairRequest::with_options`] turns off path backslashes, alias
 //! renames, or truncation closing. The default keeps those repairs on.
+//! `embedded_json` stays off. Set it to parse one JSON string when the
+//! schema type is an object or an array.
 //!
 //! [`repair_args`] and [`normalize`] produce JSON. A successful result is
 //! not a promise that the schema accepts it. The host still validates
@@ -64,14 +66,17 @@ pub enum RewriteKind {
     BoolString,
     NumberString,
     NullString,
+    /// A JSON string became an object or an array.
+    JsonString,
     DroppedUnknown,
     Empty,
 }
 
 /// Which repairs [`repair_args`] may apply.
 ///
-/// The default keeps every repair on. Set one field to `false` to turn
-/// that family off. The other repairs still run.
+/// Path, alias, and truncation repairs stay on. [`Self::embedded_json`]
+/// stays off. Set one field to change that family. The other repairs
+/// still run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RepairOptions {
@@ -81,10 +86,15 @@ pub struct RepairOptions {
     pub aliases: bool,
     /// Close a container that was cut off.
     pub truncation: bool,
+    /// Parse one JSON string when the schema type is an object or an array.
+    ///
+    /// Off by default. A string that is not JSON stays a string. `string`
+    /// in the schema type keeps the text.
+    pub embedded_json: bool,
 }
 
 impl RepairOptions {
-    /// Every repair stays on.
+    /// Path, alias, and truncation repairs stay on. `embedded_json` stays off.
     pub fn new() -> Self {
         Self::default()
     }
@@ -96,6 +106,7 @@ impl Default for RepairOptions {
             path_backslashes: true,
             aliases: true,
             truncation: true,
+            embedded_json: false,
         }
     }
 }
@@ -391,7 +402,9 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 ///
 /// A schema that is the JSON boolean `true` or `false` is not applied. A
 /// string is not parsed again when the schema asks for an object or an
-/// array. An unresolved `$ref` does not block a sibling keyword this crate
+/// array, unless [`RepairOptions::embedded_json`] is set. That parse runs
+/// once. A string that is not JSON stays a string. An unresolved `$ref`
+/// does not block a sibling keyword this crate
 /// can check. A checkable sibling, such as `maximum`, still applies. A closed
 /// object does not drop a key an unresolved `$ref` or `$dynamicRef` might name.
 ///
@@ -399,7 +412,8 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 ///
 /// [`RepairRequest::new`] keeps path backslashes, alias renames, and
 /// truncation closing on. [`RepairRequest::with_options`] turns one of
-/// those families off. The other repairs still run.
+/// those families off. The other repairs still run. `embedded_json` stays
+/// off until it is set.
 ///
 /// An OpenAI tool (`function.parameters` or `type: function` with
 /// `parameters`), an Anthropic `input_schema`, or an MCP `inputSchema`
@@ -1362,6 +1376,88 @@ mod tests {
             off.rewrites
                 .iter()
                 .all(|item| item.kind != RewriteKind::ClosedTruncation)
+        );
+    }
+
+    #[test]
+    fn embedded_json_parses_one_object_or_array_string() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "object"}}
+        });
+        let raw = r#"{"a":"{\"b\":1}"}"#;
+        let off = repair_args(&RepairRequest::new("t", raw, Some(&schema))).expect("off");
+        assert_eq!(off.value["a"], "{\"b\":1}");
+        assert!(
+            off.rewrites
+                .iter()
+                .all(|item| item.kind != RewriteKind::JsonString)
+        );
+
+        let mut options = RepairOptions::new();
+        options.embedded_json = true;
+        let on = repair_args(&RepairRequest::new("t", raw, Some(&schema)).with_options(options))
+            .expect("on");
+        assert_eq!(on.value["a"], json!({"b": 1}));
+        assert!(on.rewrites.iter().any(|item| {
+            item.kind == RewriteKind::JsonString && item.detail == "parsed json object"
+        }));
+
+        let root = repair_args(
+            &RepairRequest::new("t", r#""{\"a\":1}""#, Some(&json!({"type": "object"})))
+                .with_options(options),
+        )
+        .expect("root");
+        assert_eq!(root.value, json!({"a": 1}));
+
+        let array_schema = json!({"type": "array"});
+        let array = repair_args(
+            &RepairRequest::new("t", r#""[1,2]""#, Some(&array_schema)).with_options(options),
+        )
+        .expect("array");
+        assert_eq!(array.value, json!([1, 2]));
+        assert!(array.rewrites.iter().any(|item| {
+            item.kind == RewriteKind::JsonString && item.detail == "parsed json array"
+        }));
+
+        let broken = repair_args(
+            &RepairRequest::new("t", r#""not json""#, Some(&array_schema)).with_options(options),
+        )
+        .expect("not json");
+        assert_eq!(broken.value, "not json");
+        assert!(
+            broken
+                .rewrites
+                .iter()
+                .all(|item| item.kind != RewriteKind::JsonString)
+        );
+
+        let union = json!({"type": ["string", "object"]});
+        let kept = repair_args(
+            &RepairRequest::new("t", r#""{\"b\":1}""#, Some(&union)).with_options(options),
+        )
+        .expect("string allowed");
+        assert_eq!(kept.value, "{\"b\":1}");
+
+        let number = repair_args(
+            &RepairRequest::new("t", r#""1""#, Some(&json!({"type": "object"})))
+                .with_options(options),
+        )
+        .expect("number string");
+        assert_eq!(number.value, "1");
+
+        let doubled = schema::normalize_with(
+            &Value::String(r#""{\"b\":1}""#.into()),
+            &json!({"type": "object"}),
+            options,
+        )
+        .expect("one level");
+        assert_eq!(doubled.value, r#""{\"b\":1}""#);
+        assert!(
+            doubled
+                .rewrites
+                .iter()
+                .all(|item| item.kind != RewriteKind::JsonString)
         );
     }
 

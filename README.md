@@ -74,9 +74,11 @@ That rename is refused, and the result is ambiguous, when:
 
 ## Turning a repair off
 
-`RepairRequest::new` keeps every repair on. Build `RepairOptions::new`, set one field to `false`, and pass it to `with_options`.
+`RepairRequest::new` keeps path, alias, and truncation repairs on. `embedded_json` stays off. Build `RepairOptions::new`, set one field, and pass it to `with_options`.
 
 `path_backslashes` set to `false` leaves a Windows path escape as that JSON escape. A bare key in the same text is still quoted. `aliases` set to `false` leaves `file` and an `x-aliases` name in place. `truncation` set to `false` leaves `{"file": "a.rs"` unfixable. A finished `{file: "a.rs"}` still repairs.
+
+`embedded_json` stays off. Set it to `true` to parse one JSON string when the schema type is `object` or `array` and `string` is not also allowed. `{"a":"{\"b\":1}"}` against an object property `a` becomes `{"a":{"b":1}}`. The rewrite kind is `JsonString`, and the note is `parsed json object`. A string that is not JSON stays that string. `normalize` keeps this off.
 
 ## What success does not mean
 

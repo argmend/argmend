@@ -26,9 +26,10 @@ pub(crate) const NORMALIZE_DEPTH_LIMIT: usize = 128;
 ///
 /// A JSON boolean schema is unused. `true` and `false` both return the
 /// value with no rewrites. A string whose text is JSON stays a string when
-/// the schema type is an object or an array. `$ref` and `$dynamicRef` are
-/// not resolved. They do not veto a sibling `type`, and they do not hide a
-/// sibling bound such as `maximum`.
+/// the schema type is an object or an array. `RepairOptions::embedded_json`
+/// parses that string once. [`normalize`] leaves the option off. `$ref` and
+/// `$dynamicRef` are not resolved. They do not veto a sibling `type`, and
+/// they do not hide a sibling bound such as `maximum`.
 ///
 /// When this object has no `properties` map, a `parameters` object is the
 /// schema. `if` / `then`, `not`, and `oneOf` on that inner object still apply.
@@ -145,11 +146,60 @@ fn normalize_child(
     Ok((next, rewrites))
 }
 
+/// One JSON string becomes an object or array when the schema asks for
+/// that container and `string` is not also allowed. A string that does
+/// not parse stays a string. The parsed value is not parsed again.
+fn take_embedded_json(
+    value: &Value,
+    schema: &Value,
+    options: RepairOptions,
+) -> Result<Option<(Value, Rewrite)>, RepairError> {
+    if !options.embedded_json {
+        return Ok(None);
+    }
+    let Some(text) = value.as_str() else {
+        return Ok(None);
+    };
+    let types = schema_type_names(schema);
+    if types.is_empty() || types.contains(&"string") {
+        return Ok(None);
+    }
+    let wants_object = types.contains(&"object");
+    let wants_array = types.contains(&"array");
+    if !wants_object && !wants_array {
+        return Ok(None);
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+        return Ok(None);
+    };
+    let fits = (wants_object && parsed.is_object()) || (wants_array && parsed.is_array());
+    if !fits {
+        return Ok(None);
+    }
+    if nested_too_deeply(&parsed) {
+        return Err(RepairError::Unfixable("value is nested too deeply".into()));
+    }
+    let detail = if parsed.is_array() {
+        "parsed json array"
+    } else {
+        "parsed json object"
+    };
+    Ok(Some((
+        parsed,
+        rewrite(RewriteKind::JsonString, detail.into()),
+    )))
+}
+
 fn normalize_known(
     value: &Value,
     schema: &Value,
     options: RepairOptions,
 ) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if let Some((parsed, note)) = take_embedded_json(value, schema, options)? {
+        let (next, mut rewrites) = normalize_known(&parsed, schema, options)?;
+        rewrites.insert(0, note);
+        return Ok((next, rewrites));
+    }
     if let Some((next, rewrites)) = if_then_else(value, schema, options)? {
         return enforce_outer_object(value, next, schema, rewrites, options);
     }
