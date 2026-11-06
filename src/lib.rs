@@ -2613,6 +2613,18 @@ mod tests {
             RepairOutcome::Repaired { value, .. } => assert_eq!(value["name"], "O'Brien"),
             other => panic!("name -> {other:?}"),
         }
+        match repair_json(r#"{"path":"C:\Users\O\'Brien"}"#) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\O'Brien", "{value}");
+            }
+            other => panic!("path name -> {other:?}"),
+        }
+        match repair_json(r#"{"path":"C:\Users\'"}"#) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\'", "{value}");
+            }
+            other => panic!("path end -> {other:?}"),
+        }
     }
 
     #[test]

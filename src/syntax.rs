@@ -839,9 +839,18 @@ pub(crate) fn insert_missing_colons(s: &str) -> Result<String, RepairError> {
         if number_at(&chars, index) {
             let start = index;
             let keyish = colon_keyish(&stack);
+            // After a finished value, `1 2 3` is not a key `2`. A number
+            // is a key only while a key is expected, as in `{123 1}`.
+            let after_value = matches!(
+                stack.last(),
+                Some(ColonNest::Object {
+                    mode: ColonMode::After,
+                    ..
+                })
+            );
             index = copy_number(&chars, index, &mut out);
             let token: String = chars[start..index].iter().collect();
-            if keyish && plain_integer_key(&token) && colon_needed(&chars, index) {
+            if keyish && !after_value && plain_integer_key(&token) && colon_needed(&chars, index) {
                 out.push(':');
                 set_colon_mode(&mut stack, ColonMode::Value);
             } else {
@@ -1269,8 +1278,9 @@ pub(crate) struct BackslashPass {
 /// `C:\temp` is the six characters `C:\temp`, including when that path
 /// sits inside a sentence. `\n` in a string that is not on a drive path
 /// stays a newline. A `\\` pair stays one backslash. An escape JSON does
-/// not recognize, such as `\U`, stays a backslash. `\'` outside a path
-/// is an apostrophe. The backslash stays when that path ends on `\'`.
+/// not recognize, such as `\U`, stays a backslash. `\'` before a letter
+/// is an apostrophe, including in `O\'Brien` on a drive path. The
+/// backslash stays when that path ends on `\'`.
 pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     if !raw.contains('\\') {
         return BackslashPass {
@@ -1485,8 +1495,13 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
             index += 2;
             continue;
         }
-        // `\'` is an apostrophe. A drive path still uses the backslash.
-        if !in_path && body.get(index + 1) == Some(&'\'') {
+        // `\'` before a letter is the name, as in O'Brien. A path that
+        // ends on `\'` still keeps that separator.
+        let apostrophe_in_name = body.get(index + 1) == Some(&'\'')
+            && body
+                .get(index + 2)
+                .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_');
+        if (!in_path && body.get(index + 1) == Some(&'\'')) || (in_path && apostrophe_in_name) {
             out.push('\'');
             dropped_apostrophe = true;
             index += 2;
@@ -3693,6 +3708,14 @@ mod tests {
         }
         assert!(matches!(
             repair_tool_call_json(r#"{"a":1 2}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1 2 3}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{tel: +1 555 1234}"#),
             RepairOutcome::Unfixable(_)
         ));
         assert!(matches!(
