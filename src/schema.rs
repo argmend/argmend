@@ -26,6 +26,9 @@ const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name
 /// not resolved. They do not veto a sibling `type`, and they do not hide a
 /// sibling bound such as `maximum`.
 ///
+/// When this object has no `properties` map, a `parameters` object is the
+/// schema. `if` / `then`, `not`, and `oneOf` on that inner object still apply.
+///
 /// `unevaluatedProperties: false` keeps a property that `allOf`, `anyOf`,
 /// `oneOf`, `if` / `then` / `else`, or a dependent schema evaluated.
 /// `additionalProperties: false` does not look inside those branches. A key
@@ -43,6 +46,10 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
 }
 
 fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    // A tool object with no `properties` map stores the schema under
+    // `parameters`. Keyword checks have to see that inner object, or
+    // `if` / `then`, `not`, and `oneOf` are skipped while fields still coerce.
+    let schema = schema_view(schema);
     let (next, rewrites) = normalize_known(value, schema)?;
     if next != *value || !rewrites.is_empty() {
         if let Some(reason) = applicator_field_failure(schema, value, &next) {
