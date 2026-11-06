@@ -190,6 +190,56 @@ fn take_embedded_json(
     )))
 }
 
+/// One string, number, or bool becomes a one-element array when the
+/// schema asks for an array and not an object. The item schema still
+/// runs. A value that fails it is not returned as an array.
+fn take_wrapped_scalar(
+    value: &Value,
+    schema: &Value,
+    options: RepairOptions,
+) -> Option<(Value, Rewrite)> {
+    if !options.wrap_scalar || value.is_array() || value.is_object() || value.is_null() {
+        return None;
+    }
+    if !value.is_string() && !value.is_number() && !value.is_boolean() {
+        return None;
+    }
+    let types = schema_type_names(schema);
+    if !types.contains(&"array") || types.contains(&"object") || scalar_type_allowed(&types, value)
+    {
+        return None;
+    }
+    Some((
+        Value::Array(vec![value.clone()]),
+        rewrite(
+            RewriteKind::WrappedScalar,
+            "wrapped scalar in an array".into(),
+        ),
+    ))
+}
+
+fn scalar_type_allowed(types: &[&str], value: &Value) -> bool {
+    (value.is_string() && types.contains(&"string"))
+        || (value.is_number() && (types.contains(&"number") || types.contains(&"integer")))
+        || (value.is_boolean() && types.contains(&"boolean"))
+}
+
+fn wrapped_item_rejected(schema: &Value, item: &Value) -> bool {
+    let item_schema = schema
+        .get("items")
+        .filter(|slot| slot.is_object())
+        .or_else(|| {
+            schema
+                .get("prefixItems")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+        });
+    matches!(
+        item_schema.map(|slot| settled(slot, item)),
+        Some(Settled::No(_))
+    )
+}
+
 fn normalize_known(
     value: &Value,
     schema: &Value,
@@ -197,6 +247,18 @@ fn normalize_known(
 ) -> Result<(Value, Vec<Rewrite>), RepairError> {
     if let Some((parsed, note)) = take_embedded_json(value, schema, options)? {
         let (next, mut rewrites) = normalize_known(&parsed, schema, options)?;
+        rewrites.insert(0, note);
+        return Ok((next, rewrites));
+    }
+    if let Some((wrapped, note)) = take_wrapped_scalar(value, schema, options) {
+        let (next, mut rewrites) = normalize_known(&wrapped, schema, options)?;
+        if let Some(item) = next.as_array().and_then(|items| items.first())
+            && wrapped_item_rejected(schema, item)
+        {
+            return Err(RepairError::Ambiguous(
+                "wrapped value is outside the item schema".into(),
+            ));
+        }
         rewrites.insert(0, note);
         return Ok((next, rewrites));
     }
