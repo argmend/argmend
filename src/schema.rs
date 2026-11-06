@@ -510,7 +510,51 @@ fn violates_not(schema: &Value, value: &Value) -> bool {
     let Some(not_schema) = schema.get("not") else {
         return false;
     };
-    known_constraint(not_schema) && branch_accepts(not_schema, value)
+    // `branch_accepts` does not enter `anyOf`. A `not` around that
+    // applicator still excludes a value `settled` can judge. A bound
+    // that is not a number stays unchecked, same as before.
+    matches!(settled(not_schema, value), Settled::Yes) && not_is_checkable(not_schema)
+}
+
+fn not_is_checkable(schema: &Value) -> bool {
+    schema.get("type").is_some()
+        || schema.get("const").is_some()
+        || schema.get("enum").is_some()
+        || schema.get("properties").is_some()
+        || schema.get("required").is_some()
+        || schema.get("dependentRequired").is_some()
+        || schema.get("minLength").is_some()
+        || schema.get("maxLength").is_some()
+        || schema.get("propertyNames").is_some()
+        || schema.get("items").is_some()
+        || schema.get("prefixItems").is_some()
+        || schema.get("uniqueItems") == Some(&Value::Bool(true))
+        || numeric_keyword(schema, "minimum")
+        || numeric_keyword(schema, "maximum")
+        || numeric_keyword(schema, "exclusiveMinimum")
+        || numeric_keyword(schema, "exclusiveMaximum")
+        || numeric_keyword(schema, "multipleOf")
+        || schema.get("contains").is_some_and(Value::is_object)
+        || ["minItems", "maxItems", "minProperties", "maxProperties"]
+            .iter()
+            .any(|key| schema.get(*key).and_then(Value::as_u64).is_some())
+        || ["allOf", "anyOf", "oneOf"].iter().any(|key| {
+            schema
+                .get(*key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(not_is_checkable))
+        })
+        || schema.get("if").is_some_and(not_is_checkable)
+        || schema.get("then").is_some_and(not_is_checkable)
+        || schema.get("else").is_some_and(not_is_checkable)
+}
+
+fn numeric_keyword(schema: &Value, key: &str) -> bool {
+    schema.get(key).is_some_and(|bound| {
+        bound.as_i64().is_some()
+            || bound.as_u64().is_some()
+            || bound.as_f64().is_some_and(|number| number.is_finite())
+    })
 }
 
 /// `uniqueItems: true` refuses an array that repeats an item.
@@ -911,69 +955,6 @@ fn exact_json_number(value: &Value) -> bool {
         return int as f64 == number && number as u64 == int;
     }
     true
-}
-
-fn known_constraint(schema: &Value) -> bool {
-    schema.get("type").is_some()
-        || schema.get("const").is_some()
-        || schema.get("enum").is_some()
-        || schema.get("properties").is_some()
-        || schema.get("required").is_some()
-        || schema.get("dependentRequired").is_some()
-        || schema.get("minLength").is_some()
-        || schema.get("maxLength").is_some()
-        || schema.get("propertyNames").is_some()
-        || schema.get("items").is_some()
-        || schema.get("prefixItems").is_some()
-        || checkable_bound(schema)
-        || checkable_multiple(schema)
-        || schema.get("uniqueItems") == Some(&Value::Bool(true))
-        || checkable_contains(schema)
-        || checkable_size(schema)
-}
-
-fn checkable_bound(schema: &Value) -> bool {
-    ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
-        .into_iter()
-        .any(|key| match schema.get(key) {
-            Some(bound) if bound.is_boolean() => {
-                let pair = if key.ends_with("Minimum") {
-                    "minimum"
-                } else {
-                    "maximum"
-                };
-                schema.get(pair).is_some_and(checkable_number)
-            }
-            Some(bound) => checkable_number(bound),
-            None => false,
-        })
-}
-
-fn checkable_number(bound: &Value) -> bool {
-    bound.as_i64().is_some()
-        || bound.as_u64().is_some()
-        || comparable_f64_bound(bound).is_some()
-        || finite_above_every_u64(bound)
-}
-
-fn checkable_multiple(schema: &Value) -> bool {
-    let Some(multiple) = schema.get("multipleOf").and_then(Value::as_number) else {
-        return false;
-    };
-    let Some(factor) = multiple.as_f64() else {
-        return false;
-    };
-    factor.is_finite() && factor > 0.0 && parse_decimal(&multiple.to_string()).is_some()
-}
-
-fn checkable_contains(schema: &Value) -> bool {
-    schema.get("contains").is_some_and(Value::is_object) && contain_limits(schema).is_some()
-}
-
-fn checkable_size(schema: &Value) -> bool {
-    ["minItems", "maxItems", "minProperties", "maxProperties"]
-        .into_iter()
-        .any(|key| integer_limit(schema, key).is_some())
 }
 
 /// An `allOf` property or item bound is checked after the outer schema

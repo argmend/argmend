@@ -1206,6 +1206,25 @@ mod tests {
     }
 
     #[test]
+    fn not_any_of_does_not_drop_an_unevaluated_key() {
+        let schema = json!({
+            "allOf": [{
+                "properties": {
+                    "a": {"not": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}
+                }
+            }],
+            "properties": {"a": {"type": "string"}},
+            "type": "object",
+            "unevaluatedProperties": false
+        });
+        let err = normalize(&json!({"a": "1", "n": null}), &schema).expect_err("excluded string");
+        let text = err.to_string();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{text}");
+        assert!(text.contains("'a'"), "{text}");
+        assert!(text.contains("excluded by not"), "{text}");
+    }
+
+    #[test]
     fn option_turns_off_path_backslashes_only() {
         let raw = r#"{path: "C:\temp\file"}"#;
         let on = repair_args(&RepairRequest::new("read", raw, None)).expect("on");
