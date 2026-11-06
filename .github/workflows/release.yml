@@ -127,6 +127,7 @@ jobs:
       - name: Publish the crate
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           case "$TAG" in
@@ -136,5 +137,5 @@ jobs:
               exit 1
               ;;
           esac
-          gh workflow run publish-crates.yml --ref main -f "tag=${TAG}"
+          gh workflow run publish-crates.yml --repo "$GH_REPO" --ref main -f "tag=${TAG}"
           echo "OK: started publish-crates.yml for ${TAG}"
