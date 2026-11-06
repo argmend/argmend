@@ -75,7 +75,7 @@ jobs:
           persist-credentials: false
           ref: ${{ env.TAG }}
           path: crate
-      - uses: ./.github/actions/setup-rust
+      - uses: ./publisher/.github/actions/setup-rust
       - name: Package, SBOM, and provenance
         working-directory: crate
         run: |
