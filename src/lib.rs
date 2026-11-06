@@ -9,7 +9,8 @@
 //! [`RepairRequest::with_options`] turns off path backslashes, alias
 //! renames, or truncation closing. The default keeps those repairs on.
 //! `embedded_json` stays off. Set it to parse one JSON string when the
-//! schema type is an object or an array.
+//! schema type is an object or an array. `leading_prose` stays off.
+//! [`repair_json_with`] turns that extract on.
 //!
 //! [`repair_args`] and [`normalize`] produce JSON. A successful result is
 //! not a promise that the schema accepts it. The host still validates
@@ -75,8 +76,8 @@ pub enum RewriteKind {
 /// Which repairs [`repair_args`] may apply.
 ///
 /// Path, alias, and truncation repairs stay on. [`Self::embedded_json`]
-/// stays off. Set one field to change that family. The other repairs
-/// still run.
+/// and [`Self::leading_prose`] stay off. Set one field to change that
+/// family. The other repairs still run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RepairOptions {
@@ -91,10 +92,16 @@ pub struct RepairOptions {
     /// Off by default. A string that is not JSON stays a string. `string`
     /// in the schema type keeps the text.
     pub embedded_json: bool,
+    /// Take one object or array after leading prose or a `tool_call` tag.
+    ///
+    /// Off by default. [`repair_json`] leaves that text unfixable.
+    /// [`repair_json_with`] turns the extract on.
+    pub leading_prose: bool,
 }
 
 impl RepairOptions {
-    /// Path, alias, and truncation repairs stay on. `embedded_json` stays off.
+    /// Path, alias, and truncation repairs stay on. `embedded_json` and
+    /// `leading_prose` stay off.
     pub fn new() -> Self {
         Self::default()
     }
@@ -107,6 +114,7 @@ impl Default for RepairOptions {
             aliases: true,
             truncation: true,
             embedded_json: false,
+            leading_prose: false,
         }
     }
 }
@@ -178,11 +186,22 @@ pub enum RepairError {
 /// `Here is the call: {"a": 1}`, stays unfixable. A markdown fence that
 /// starts the input is unwrapped. A word before that fence stays unfixable.
 /// A `<tool_call>` tag around the value stays unfixable. A second JSON value
-/// stays unfixable. An extra `}` or `]` stays unfixable. A missing inner closer is
+/// stays unfixable. [`repair_json_with`] can take one object or array after
+/// that prose or tag. Two JSON values are still not guessed. An extra `}`
+/// or `]` stays unfixable. A missing inner closer is
 /// inserted when the outer closer is present. A number that is the last
 /// character stays unfixable. Whitespace after that number closes the container.
 pub fn repair_json(raw: &str) -> RepairOutcome {
-    match salvage_value(raw, RepairOptions::default()) {
+    repair_json_with(raw, RepairOptions::default())
+}
+
+/// [`repair_json`] with [`RepairOptions`].
+///
+/// `leading_prose` extracts one object or array after a prefix, a word
+/// before a fence, or a `<tool_call>` tag. It stays off in [`repair_json`].
+/// Two JSON values stay unfixable or ambiguous.
+pub fn repair_json_with(raw: &str, options: RepairOptions) -> RepairOutcome {
+    match salvage_value(raw, options) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
         Ok((value, repairs)) => RepairOutcome::Repaired { value, repairs },
         Err(RepairError::Unfixable(reason)) => RepairOutcome::Unfixable(reason),
@@ -277,9 +296,21 @@ fn salvage_value(raw: &str, options: RepairOptions) -> Result<(Value, Vec<Rewrit
             prefix.push(note(RewriteKind::XmlParameters, "read xml parameters"));
             Ok((value, prefix))
         }
-        None => Err(RepairError::Unfixable(format!(
-            "parse failed after all repairs: {parse_error}"
-        ))),
+        None => {
+            if options.leading_prose
+                && let Some(slice) = salvage::isolate_leading_value(&current)?
+            {
+                let mut quiet = options;
+                quiet.leading_prose = false;
+                let (value, repairs) = salvage_value(&slice, quiet)?;
+                prefix.push(note(RewriteKind::Syntax, "removed leading prose"));
+                prefix.extend(repairs);
+                return Ok((value, prefix));
+            }
+            Err(RepairError::Unfixable(format!(
+                "parse failed after all repairs: {parse_error}"
+            )))
+        }
     }
 }
 
@@ -544,6 +575,30 @@ mod tests {
         assert!(matches!(
             repair_json("<tool_call>{\"a\":1}</tool_call>"),
             RepairOutcome::Unfixable(_)
+        ));
+        let mut options = RepairOptions::new();
+        options.leading_prose = true;
+        for raw in [
+            r#"Here is the call: {"a": 1}"#,
+            "Sure:\n```json\n{\"a\": 1}\n```",
+            "<tool_call>{\"a\":1}</tool_call>",
+        ] {
+            match repair_json_with(raw, options) {
+                RepairOutcome::Repaired { value, repairs } => {
+                    assert_eq!(value["a"], 1, "{raw:?}");
+                    assert!(
+                        repairs
+                            .iter()
+                            .any(|item| item.detail.contains("leading prose")),
+                        "{raw:?} {repairs:?}"
+                    );
+                }
+                other => panic!("{raw:?}: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            repair_json_with(r#"Here {"a":1} {"b":2}"#, options),
+            RepairOutcome::Unfixable(_) | RepairOutcome::Ambiguous(_)
         ));
         match repair_json("{\"a\": 1}\nDone.") {
             RepairOutcome::Repaired { value, repairs } => {

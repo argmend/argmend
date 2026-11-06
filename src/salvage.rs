@@ -253,6 +253,57 @@ pub(crate) fn close_truncated(raw: &str) -> Option<Truncation> {
     })
 }
 
+/// One object, array, or fence after a prefix, or the inside of one
+/// `<tool_call>` tag. `None` means the text already starts at that value.
+/// Two of those values is ambiguous, so the caller does not pick one.
+pub(crate) fn isolate_leading_value(text: &str) -> Result<Option<String>, RepairError> {
+    if let Some(inner) = tool_call_body(text)? {
+        return Ok(Some(inner));
+    }
+    let trimmed = text.trim();
+    let Some(start) = leading_json_start(trimmed) else {
+        return Ok(None);
+    };
+    if start == 0 {
+        return Ok(None);
+    }
+    Ok(Some(trimmed[start..].to_string()))
+}
+
+fn tool_call_body(text: &str) -> Result<Option<String>, RepairError> {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+    let Some(first) = text.find(OPEN) else {
+        return Ok(None);
+    };
+    if has_json_start(&text[..first]) || text[first + OPEN.len()..].contains(OPEN) {
+        return Err(RepairError::Ambiguous("more than one JSON value".into()));
+    }
+    let rest = &text[first + OPEN.len()..];
+    let Some(end) = rest.find(CLOSE) else {
+        return Ok(None);
+    };
+    if has_json_start(&rest[end + CLOSE.len()..]) {
+        return Err(RepairError::Ambiguous("more than one JSON value".into()));
+    }
+    Ok(Some(rest[..end].trim().to_string()))
+}
+
+fn has_json_start(text: &str) -> bool {
+    text.contains('{') || text.contains('[') || text.contains("```")
+}
+
+fn leading_json_start(text: &str) -> Option<usize> {
+    let brace = text.find(['{', '[']);
+    let fence = text.find("```");
+    match (brace, fence) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
 pub(crate) fn xml_parameters(raw: &str) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let trimmed = raw.trim();
     if !trimmed.starts_with("<parameter") {
