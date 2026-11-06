@@ -52,6 +52,7 @@ fn syntax_note(detail: &str) -> Rewrite {
     Rewrite {
         kind: RewriteKind::Syntax,
         detail: detail.to_string(),
+        pointer: None,
     }
 }
 
@@ -246,6 +247,7 @@ fn outcome_with_unique_keys(text: &str, value: Value, mut repairs: Vec<Rewrite>)
                 repairs.push(Rewrite {
                     kind: RewriteKind::Syntax,
                     detail,
+                    pointer: None,
                 });
             }
             if repairs.is_empty() {

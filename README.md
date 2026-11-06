@@ -56,7 +56,7 @@ Pass a tool schema with `repair_args` when you have one. A value nested more tha
 
 `normalize` takes a parsed value and a schema. It does not read the original text.
 
-`{"n": "5"}` with an integer property `n` becomes `{"n": 5}`. The rewrite kind is `NumberString`, and the note is `integer string 5`.
+`{"n": "5"}` with an integer property `n` becomes `{"n": 5}`. The rewrite kind is `NumberString`, the note is `integer string 5`, and the pointer is `/n`.
 
 ## Path names and aliases
 
