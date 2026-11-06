@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use super::{RepairError, RepairOutcome, Rewrite, RewriteKind};
+#[cfg(test)]
+use super::RepairOutcome;
+use super::{RepairError, Rewrite, RewriteKind};
 
 /// Attempt to parse `raw` as JSON, applying progressive repairs if the
 /// initial parse fails.
@@ -215,6 +217,7 @@ pub(crate) fn apply_stages(raw: &str) -> Result<Staged, RepairError> {
     Ok(Staged { text, repairs })
 }
 
+#[cfg(test)]
 pub(crate) fn repair_tool_call_json(raw: &str) -> RepairOutcome {
     let passed = pass_string_backslashes(raw);
     if let Ok(value) = serde_json::from_str(&passed.text) {
@@ -233,6 +236,7 @@ pub(crate) fn repair_tool_call_json(raw: &str) -> RepairOutcome {
     }
 }
 
+#[cfg(test)]
 fn outcome_with_unique_keys(text: &str, value: Value, mut repairs: Vec<Rewrite>) -> RepairOutcome {
     match duplicate_key_notes(text) {
         Ok(notes) => {
