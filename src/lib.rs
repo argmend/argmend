@@ -10,7 +10,8 @@
 //! renames, or truncation closing. The default keeps those repairs on.
 //! `embedded_json` stays off. Set it to parse one JSON string when the
 //! schema type is an object or an array. `leading_prose` stays off.
-//! [`repair_json_with`] turns that extract on. `wrap_scalar` stays off.
+//! Set it and pass the options to [`repair_json_with`] to take one
+//! object or array after a prefix. `wrap_scalar` stays off.
 //! [`normalize`] uses those defaults. [`normalize_with`] is the same
 //! call with explicit switches.
 //!
@@ -99,7 +100,7 @@ pub struct RepairOptions {
     /// Take one object or array after leading prose or a `tool_call` tag.
     ///
     /// Off by default. [`repair_json`] leaves that text unfixable.
-    /// [`repair_json_with`] turns the extract on.
+    /// Set this flag and pass the options to [`repair_json_with`].
     pub leading_prose: bool,
     /// Wrap one string, number, or bool in an array when the schema type
     /// is `array` and not also `object`.
@@ -239,11 +240,20 @@ pub struct ArgumentPreview {
 /// [`RepairOutcome::Unfixable`] for `[1, 2, 3`. The preview may show
 /// `[1, 2, 3]` with `complete: false`. That partial value must not be
 /// passed to a tool. An unclosed string has no value and does not panic.
+/// JSON whitespace still counts as complete. A no-break space around
+/// the value does not.
 pub fn preview_args(raw: &str) -> ArgumentPreview {
-    if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
         return ArgumentPreview {
             value: Some(value),
             complete: true,
+        };
+    }
+    // `trim` also drops U+00A0. That text is not JSON yet.
+    if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+        return ArgumentPreview {
+            value: Some(value),
+            complete: false,
         };
     }
     let padded = format!("{}\n", raw.trim_end());
@@ -624,6 +634,10 @@ mod tests {
             repair_json("<tool_call>{\"a\":1}</tool_call>"),
             RepairOutcome::Unfixable(_)
         ));
+        assert!(matches!(
+            repair_json_with(r#"Here is the call: {"a": 1}"#, RepairOptions::new()),
+            RepairOutcome::Unfixable(_)
+        ));
         let mut options = RepairOptions::new();
         options.leading_prose = true;
         for raw in [
@@ -677,6 +691,14 @@ mod tests {
         let open_string = preview_args("\"hello");
         assert!(!open_string.complete);
         assert!(open_string.value.is_none());
+
+        let spaced = preview_args("\n[1, 2, 3]\n");
+        assert!(spaced.complete);
+        assert_eq!(spaced.value, Some(json!([1, 2, 3])));
+
+        let nbsp = preview_args("\u{00a0}{\"a\":1}");
+        assert!(!nbsp.complete, "{nbsp:?}");
+        assert_eq!(nbsp.value, Some(json!({"a": 1})));
     }
 
     #[test]
@@ -3092,6 +3114,8 @@ mod tests {
         one_path(r#"{"path": "C:\n\file"}"#, "path", "C:\\n\\file");
         one_path(r#"{path: 'C:\temp'}"#, "path", "C:\\temp");
         one_path(r#"{"path": "C:\users\sebta"}"#, "path", "C:\\users\\sebta");
+        one_path(r#"{"path": "C:\u0065\x"}"#, "path", "C:\\u0065\\x");
+        one_path(r#"{"path": "C:\u0065"}"#, "path", "C:\\u0065");
         one_path(
             r#"{"path": "C:\temp\new\bin\form\return"}"#,
             "path",
@@ -3686,6 +3710,47 @@ mod tests {
         assert_bounds(
             "9007199254740993",
             r#"{"type":"integer","minimum":9223372036854777856}"#,
+        );
+        // -1e19 is below every i64. It must still reject, and it must
+        // not hide a maximum that this integer can be compared with.
+        assert_bounds("9007199254740993", r#"{"type":"integer","maximum":-1e19}"#);
+        assert_bounds(
+            "9007199254740993",
+            r#"{"type":"integer","exclusiveMaximum":-1e19}"#,
+        );
+        assert_bounds(
+            "9007199254740993.0",
+            r#"{"type":"integer","maximum":-1e19}"#,
+        );
+        assert_bounds(
+            "9007199254740993",
+            r#"{"type":"integer","minimum":-1e19,"maximum":10}"#,
+        );
+        assert_bounds(
+            "9223372036854775808",
+            r#"{"type":"integer","maximum":-1e19}"#,
+        );
+        assert_bounds(
+            "9223372036854775808",
+            r#"{"type":"integer","minimum":-1e19,"maximum":10}"#,
+        );
+        assert_number("5", r#"{"type":"integer","minimum":-1e19}"#);
+        assert_number("9007199254740993", r#"{"type":"integer","maximum":1e19}"#);
+        assert_number(
+            "9223372036854775808",
+            r#"{"type":"integer","maximum":1e20}"#,
+        );
+        assert_number("9007199254740993", r#"{"type":"integer","maximum":"10"}"#);
+        let schema = parsed(r#"{"type":"integer","minimum":-1e19,"maximum":10}"#);
+        let err = repair_args(&RepairRequest::new(
+            "read",
+            "\"9007199254740993\"",
+            Some(&schema),
+        ))
+        .expect_err("repair args");
+        assert!(
+            err.to_string().contains("outside the schema bounds"),
+            "{err}"
         );
         assert_bounds(
             "18446744073709551615",

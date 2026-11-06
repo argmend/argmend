@@ -846,22 +846,31 @@ fn violates_bounds(schema: &Value, value: &Value) -> bool {
 }
 
 fn i64_against_schema_bounds(schema: &Value, int: i64) -> Option<bool> {
+    // One number that this integer cannot be ordered against must not
+    // hide a bound that it can. `-1e19` is still below every `i64`.
+    if i64_outside_bounds(schema, int) {
+        return Some(true);
+    }
     for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
         let Some(bound) = schema.get(key) else {
             continue;
         };
-        if bound.is_boolean() {
+        if bound.is_boolean() || i64_bound_known(schema, key, bound) {
             continue;
         }
-        if schema_i64_limit(schema, key).is_none()
-            && bound.as_u64().is_none()
-            && !finite_above_every_u64(bound)
-            && comparable_f64_bound(bound).is_none()
-        {
+        if bound.as_f64().is_some_and(f64::is_finite) {
             return None;
         }
     }
-    Some(i64_outside_bounds(schema, int))
+    Some(false)
+}
+
+fn i64_bound_known(schema: &Value, key: &str, bound: &Value) -> bool {
+    schema_i64_limit(schema, key).is_some()
+        || bound.as_u64().is_some()
+        || finite_below_every_i64(bound)
+        || finite_above_every_i64(bound)
+        || comparable_f64_bound(bound).is_some()
 }
 
 fn comparable_f64_bound(bound: &Value) -> Option<f64> {
@@ -898,7 +907,9 @@ fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) 
         int.cmp(&limit)
     } else if let Some(limit) = bound.as_u64() {
         cmp_i64_u64(int, limit)
-    } else if finite_above_every_u64(bound) {
+    } else if finite_below_every_i64(bound) {
+        Ordering::Greater
+    } else if finite_above_every_i64(bound) {
         Ordering::Less
     } else if let Some(limit) = comparable_f64_bound(bound) {
         cmp_i64_f64(int, limit)
@@ -928,6 +939,24 @@ fn finite_above_every_u64(bound: &Value) -> bool {
         .is_some_and(|number| number.is_finite() && number >= u64::MAX as f64)
 }
 
+fn finite_below_every_u64(bound: &Value) -> bool {
+    bound
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number < 0.0)
+}
+
+fn finite_below_every_i64(bound: &Value) -> bool {
+    bound
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number < i64::MIN as f64)
+}
+
+fn finite_above_every_i64(bound: &Value) -> bool {
+    bound
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && number >= i64::MAX as f64)
+}
+
 fn cmp_i64_f64(int: i64, limit: f64) -> Ordering {
     let trunc = limit.trunc() as i64;
     match int.cmp(&trunc) {
@@ -939,22 +968,29 @@ fn cmp_i64_f64(int: i64, limit: f64) -> Ordering {
 }
 
 fn u64_against_schema_bounds(schema: &Value, int: u64) -> Option<bool> {
+    if u64_outside_bounds(schema, int) {
+        return Some(true);
+    }
     for key in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
         let Some(bound) = schema.get(key) else {
             continue;
         };
-        if bound.is_boolean() {
+        if bound.is_boolean() || u64_bound_known(bound) {
             continue;
         }
-        if bound.as_i64().is_none()
-            && bound.as_u64().is_none()
-            && !finite_above_every_u64(bound)
-            && comparable_f64_bound(bound).is_none()
-        {
+        if bound.as_f64().is_some_and(f64::is_finite) {
             return None;
         }
     }
-    Some(u64_outside_bounds(schema, int))
+    Some(false)
+}
+
+fn u64_bound_known(bound: &Value) -> bool {
+    bound.as_i64().is_some()
+        || bound.as_u64().is_some()
+        || finite_below_every_u64(bound)
+        || finite_above_every_u64(bound)
+        || comparable_f64_bound(bound).is_some()
 }
 
 fn u64_outside_bounds(schema: &Value, int: u64) -> bool {
@@ -1004,6 +1040,9 @@ fn cmp_u64_bound(int: u64, bound: &Value) -> Option<Ordering> {
     }
     if let Some(limit) = bound.as_u64() {
         return Some(int.cmp(&limit));
+    }
+    if finite_below_every_u64(bound) {
+        return Some(Ordering::Greater);
     }
     if finite_above_every_u64(bound) {
         return Some(Ordering::Less);
