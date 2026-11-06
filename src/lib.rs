@@ -1230,6 +1230,26 @@ mod tests {
     }
 
     #[test]
+    fn one_of_does_not_drop_a_key_when_the_branch_still_misses() {
+        let schema = json!({
+            "oneOf": [{
+                "additionalProperties": false,
+                "allOf": [{"properties": {"a": {"type": "integer"}}}],
+                "properties": {"n": {"type": "string"}},
+                "type": "object"
+            }, {
+                "additionalProperties": false,
+                "properties": {"b": {"allOf": [{"type": "integer"}, {"type": "integer"}]}},
+                "type": "object"
+            }]
+        });
+        let value = json!({"b": null, "n": null});
+        let repaired = normalize(&value, &schema).expect("both branches miss");
+        assert_eq!(repaired.value, value);
+        assert!(repaired.rewrites.is_empty(), "{repaired:?}");
+    }
+
+    #[test]
     fn number_string_rewrite_points_at_the_property() {
         let schema = json!({
             "type": "object",

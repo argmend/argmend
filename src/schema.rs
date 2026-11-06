@@ -477,7 +477,9 @@ fn exclusive_branch(
     for branch in branches {
         match normalize_child(value, branch, options) {
             Ok((next, rewrites)) => {
-                if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
+                // `branch_accepts` does not enter `allOf`. A branch can
+                // drop a key and still miss, and that drop must not win.
+                if accepts_with_applicators(branch, &next) && branch_accepts(schema, &next) {
                     matched.push((next, rewrites));
                 }
             }
