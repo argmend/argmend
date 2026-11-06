@@ -52,6 +52,10 @@ cargo run --example repair
 
 Pass a tool schema with `repair_args` when you have one. A value nested more than 128 arrays or objects is an error. `repair_args` uses that same limit. A `parameters` object is that schema when the outer object has no `properties` map, and `if`, `then`, `not`, and `oneOf` on it still apply. OpenAI `function.parameters`, Anthropic `input_schema`, and MCP `inputSchema` are that schema too. `{"a":"1"}` against an integer property `a` becomes `{"a": 1}`. Those applicators still apply inside the extracted schema. A `type: function` object with no parameters object is unfixable (`unrecognized OpenAI tool definition`). Blank input against `{"type":"function","parameters":{"type":"object"}}` is `{}`, not a failure of the type `function`. Any other object is still the schema itself. Blank input becomes `{}`, `[]`, or null, matching the schema type. A string, number, or boolean is not invented.
 
+## Streaming preview
+
+`preview_args` reads an argument while tokens are still arriving. `[1, 2, 3` stays `Unfixable` from `repair_json`. The preview can show `[1, 2, 3]` with `complete: false`. That partial value must not be passed to a tool. `complete` is true only when the text is already one JSON value.
+
 ## Already parsed JSON
 
 `normalize` takes a parsed value and a schema. It does not read the original text.
