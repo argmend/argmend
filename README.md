@@ -35,9 +35,12 @@ fn main() {
         RepairOutcome::Unfixable(reason) | RepairOutcome::Ambiguous(reason) => {
             eprintln!("{reason}");
         }
+        other => eprintln!("{other:?}"),
     }
 }
 ```
+
+Keep a wildcard arm on `RepairOutcome`, `RewriteKind`, and `RepairError`. A later release can add a variant. Build `RepairRequest` with `RepairRequest::new`.
 
 That program is [examples/repair.rs](examples/repair.rs). Run it with:
 

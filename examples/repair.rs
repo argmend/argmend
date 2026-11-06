@@ -11,5 +11,9 @@ fn main() {
             eprintln!("{reason}");
             std::process::exit(1);
         }
+        other => {
+            eprintln!("{other:?}");
+            std::process::exit(1);
+        }
     }
 }
