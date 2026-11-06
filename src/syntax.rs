@@ -1476,7 +1476,10 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
             index += 2;
             continue;
         }
-        if is_unicode_escape(body, index) {
+        let in_path = whole_path || mask.get(index).copied().unwrap_or(false);
+        // `C:\u0065` is a directory name. `\u0041` outside a path stays
+        // the character A.
+        if is_unicode_escape(body, index) && !in_path {
             out.extend(body[index..index + 6].iter().copied());
             index += 6;
             continue;
@@ -1487,7 +1490,6 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
             index += 2;
             continue;
         }
-        let in_path = whole_path || mask.get(index).copied().unwrap_or(false);
         if !in_path && is_short_escape(body, index) {
             out.push('\\');
             out.push(body[index + 1]);

@@ -3109,6 +3109,8 @@ mod tests {
         one_path(r#"{"path": "C:\n\file"}"#, "path", "C:\\n\\file");
         one_path(r#"{path: 'C:\temp'}"#, "path", "C:\\temp");
         one_path(r#"{"path": "C:\users\sebta"}"#, "path", "C:\\users\\sebta");
+        one_path(r#"{"path": "C:\u0065\x"}"#, "path", "C:\\u0065\\x");
+        one_path(r#"{"path": "C:\u0065"}"#, "path", "C:\\u0065");
         one_path(
             r#"{"path": "C:\temp\new\bin\form\return"}"#,
             "path",
