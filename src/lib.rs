@@ -128,18 +128,8 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         }
     }
 
-    if prefix.is_empty() {
-        match syntax::repair_tool_call_json(&current) {
-            RepairOutcome::Valid(value) => return Ok((value, prefix)),
-            RepairOutcome::Repaired { value, repairs } => {
-                prefix.extend(repairs);
-                return Ok((value, prefix));
-            }
-            RepairOutcome::Ambiguous(reason) => return Err(RepairError::Ambiguous(reason)),
-            RepairOutcome::Unfixable(_) => {}
-        }
-    }
-
+    // The backslash pass already ran. Stages, prose, and truncation stay on
+    // this path so a leading BOM does not skip or repeat them.
     let staged = syntax::apply_stages(&body)?;
     let parse_error = match serde_json::from_str::<Value>(&staged.text) {
         Ok(value) => {
@@ -2203,6 +2193,45 @@ mod tests {
         .expect("nbsp");
         assert_eq!(repaired.value["ok"], true);
         assert_eq!(repaired.value["n"], "\u{a0}01\u{a0}");
+    }
+
+    #[test]
+    fn leading_bom_truncates_like_the_same_text() {
+        fn notes_without_bom(repairs: &[Rewrite]) -> Vec<&str> {
+            repairs
+                .iter()
+                .map(|item| item.detail.as_str())
+                .filter(|detail| !detail.contains("BOM"))
+                .collect()
+        }
+        let plain = repair_json(r#"{"a": true"#);
+        let bom = repair_json("\u{feff}{\"a\": true");
+        match (plain, bom) {
+            (
+                RepairOutcome::Repaired {
+                    value: plain_value,
+                    repairs: plain_repairs,
+                },
+                RepairOutcome::Repaired {
+                    value: bom_value,
+                    repairs: bom_repairs,
+                },
+            ) => {
+                assert_eq!(plain_value["a"], true);
+                assert_eq!(plain_value, bom_value);
+                assert!(
+                    bom_repairs
+                        .iter()
+                        .any(|item| item.detail.contains("stripped leading BOM")),
+                    "{bom_repairs:?}"
+                );
+                assert_eq!(
+                    notes_without_bom(&plain_repairs),
+                    notes_without_bom(&bom_repairs)
+                );
+            }
+            other => panic!("truncated object with and without a BOM -> {other:?}"),
+        }
     }
 
     #[test]
