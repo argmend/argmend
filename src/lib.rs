@@ -10,7 +10,8 @@
 //! renames, or truncation closing. The default keeps those repairs on.
 //! `embedded_json` stays off. Set it to parse one JSON string when the
 //! schema type is an object or an array. `leading_prose` stays off.
-//! [`repair_json_with`] turns that extract on. `wrap_scalar` stays off.
+//! Set it and pass the options to [`repair_json_with`] to take one
+//! object or array after a prefix. `wrap_scalar` stays off.
 //! [`normalize`] uses those defaults. [`normalize_with`] is the same
 //! call with explicit switches.
 //!
@@ -99,7 +100,7 @@ pub struct RepairOptions {
     /// Take one object or array after leading prose or a `tool_call` tag.
     ///
     /// Off by default. [`repair_json`] leaves that text unfixable.
-    /// [`repair_json_with`] turns the extract on.
+    /// Set this flag and pass the options to [`repair_json_with`].
     pub leading_prose: bool,
     /// Wrap one string, number, or bool in an array when the schema type
     /// is `array` and not also `object`.
@@ -631,6 +632,10 @@ mod tests {
         ));
         assert!(matches!(
             repair_json("<tool_call>{\"a\":1}</tool_call>"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json_with(r#"Here is the call: {"a": 1}"#, RepairOptions::new()),
             RepairOutcome::Unfixable(_)
         ));
         let mut options = RepairOptions::new();
