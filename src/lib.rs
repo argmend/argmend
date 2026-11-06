@@ -2596,6 +2596,43 @@ mod tests {
     }
 
     #[test]
+    fn escaped_apostrophe_in_a_double_quoted_string_is_an_apostrophe() {
+        match repair_json(r#"{"msg":"it\'s fine"}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["msg"], "it's fine");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("apostrophe")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("double quoted apostrophe -> {other:?}"),
+        }
+        match repair_json(r#"{"name":"O\'Brien"}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["name"], "O'Brien"),
+            other => panic!("name -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_space_run_after_a_nested_closer_repairs() {
+        let mut raw = String::from(r#"{"a":[1]"#);
+        raw.extend(std::iter::repeat_n(' ', 20_000));
+        raw.push_str(r#","b":2 "#);
+        let started = std::time::Instant::now();
+        match repair_json(&raw) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["a"][0], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("{other:?}"),
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_millis() < 200, "space run took {elapsed:?}");
+    }
+
+    #[test]
     fn single_quoted_apostrophe_and_newline() {
         match repair_json(r"{'a': 'it\'s // fine'}") {
             RepairOutcome::Repaired { value, .. } => {

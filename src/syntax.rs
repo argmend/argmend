@@ -1269,7 +1269,8 @@ pub(crate) struct BackslashPass {
 /// `C:\temp` is the six characters `C:\temp`, including when that path
 /// sits inside a sentence. `\n` in a string that is not on a drive path
 /// stays a newline. A `\\` pair stays one backslash. An escape JSON does
-/// not recognize, such as `\U`, stays a backslash.
+/// not recognize, such as `\U`, stays a backslash. `\'` outside a path
+/// is an apostrophe. The backslash stays when that path ends on `\'`.
 pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     if !raw.contains('\\') {
         return BackslashPass {
@@ -1282,6 +1283,7 @@ pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     let mut index = 0;
     let mut kept_path = false;
     let mut kept_invalid = false;
+    let mut dropped_apostrophe = false;
     while index < chars.len() {
         if chars[index] != '"' {
             out.push(chars[index]);
@@ -1295,7 +1297,10 @@ pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
             if rewritten.kept_path {
                 kept_path = true;
             }
-            if rewritten.kept_invalid || !rewritten.kept_path {
+            if rewritten.dropped_apostrophe {
+                dropped_apostrophe = true;
+            }
+            if rewritten.kept_invalid || (!rewritten.kept_path && !rewritten.dropped_apostrophe) {
                 kept_invalid = true;
             }
         }
@@ -1311,6 +1316,9 @@ pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     let mut repairs = Vec::new();
     if kept_path {
         repairs.push(syntax_note("kept windows path backslashes"));
+    }
+    if dropped_apostrophe {
+        repairs.push(syntax_note("dropped an escaped apostrophe"));
     }
     if kept_invalid {
         repairs.push(syntax_note("kept invalid escapes"));
@@ -1422,6 +1430,7 @@ struct StringBodyRewrite {
     text: String,
     kept_path: bool,
     kept_invalid: bool,
+    dropped_apostrophe: bool,
 }
 
 fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
@@ -1431,6 +1440,7 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
         return StringBodyRewrite {
             kept_path: text != original,
             kept_invalid: false,
+            dropped_apostrophe: false,
             text,
         };
     }
@@ -1444,6 +1454,7 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
     let mut index = 0;
     let mut kept_path = false;
     let mut kept_invalid = false;
+    let mut dropped_apostrophe = false;
     while index < body.len() {
         if body[index] != '\\' {
             out.push(body[index]);
@@ -1474,6 +1485,13 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
             index += 2;
             continue;
         }
+        // `\'` is an apostrophe. A drive path still uses the backslash.
+        if !in_path && body.get(index + 1) == Some(&'\'') {
+            out.push('\'');
+            dropped_apostrophe = true;
+            index += 2;
+            continue;
+        }
         out.push('\\');
         out.push('\\');
         if in_path {
@@ -1487,6 +1505,7 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
         text: out,
         kept_path,
         kept_invalid,
+        dropped_apostrophe,
     }
 }
 
@@ -1666,19 +1685,29 @@ pub(crate) fn quote_unquoted_paths(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() + 8);
     let mut index = 0;
+    // The previous non-space token. Walking back over a long space run
+    // on every character made a padded tool call quadratic.
+    let mut prev_sig: Option<char> = None;
     while index < chars.len() {
         if chars[index] == '"' {
-            index = copy_quoted(&chars, index, &mut out);
+            let next = copy_quoted(&chars, index, &mut out);
+            prev_sig = sig_before(&chars, next);
+            index = next;
             continue;
         }
-        if path_value_position(&chars, index)
+        if matches!(prev_sig, Some(':' | '[' | ',' | '='))
             && let Some(end) = unquoted_path_end(&chars, index)
         {
             push_json_string(&mut out, &chars[index..end]);
+            prev_sig = sig_before(&chars, end);
             index = end;
             continue;
         }
-        out.push(chars[index]);
+        let ch = chars[index];
+        out.push(ch);
+        if !ch.is_ascii_whitespace() {
+            prev_sig = Some(ch);
+        }
         index += 1;
     }
     out
@@ -1824,14 +1853,18 @@ fn is_url_char(ch: char) -> bool {
 }
 
 fn path_value_position(chars: &[char], index: usize) -> bool {
+    matches!(sig_before(chars, index), Some(':' | '[' | ',' | '='))
+}
+
+fn sig_before(chars: &[char], index: usize) -> Option<char> {
     let mut prev = index;
     while prev > 0 {
         prev -= 1;
         if !chars[prev].is_ascii_whitespace() {
-            return matches!(chars[prev], ':' | '[' | ',' | '=');
+            return Some(chars[prev]);
         }
     }
-    false
+    None
 }
 
 fn push_json_string(out: &mut String, chars: &[char]) {
