@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/argmend/argmend/compare/v0.3.0...v0.4.0) (2026-11-06)
+
+
+### Features
+
+* let normalize take repair options ([#214](https://github.com/argmend/argmend/issues/214)) ([ff705c3](https://github.com/argmend/argmend/commit/ff705c3084e6d7f00272b0f9f1b66af8fd4823e9)), closes [#211](https://github.com/argmend/argmend/issues/211)
+
+
+### Bug Fixes
+
+* compare large integers with a power-of-ten bound ([#218](https://github.com/argmend/argmend/issues/218)) ([22467ac](https://github.com/argmend/argmend/commit/22467acb05699ced3fec43a6d7e4be3f4694b42f))
+* keep a JSON Schema when it also has parameters ([#213](https://github.com/argmend/argmend/issues/213)) ([ab11943](https://github.com/argmend/argmend/commit/ab119438bc5e71cac0e83d66996a000c64d7b5f7)), closes [#210](https://github.com/argmend/argmend/issues/210)
+* keep schema documents, apostrophes, and padded repairs ([#216](https://github.com/argmend/argmend/issues/216)) ([4238e8f](https://github.com/argmend/argmend/commit/4238e8fa29c6595182aa8297f470eec8396778dc))
+* reject bad integer bounds, previews, and path unicode ([#217](https://github.com/argmend/argmend/issues/217)) ([c0d85ab](https://github.com/argmend/argmend/commit/c0d85abd3fc32fa2756248e42d1b8eb398643f53))
+
 ## [0.3.0](https://github.com/argmend/argmend/compare/v0.2.8...v0.3.0) (2026-11-06)
 
 
