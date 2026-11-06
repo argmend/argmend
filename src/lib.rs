@@ -6395,6 +6395,104 @@ mod tests {
     }
 
     #[test]
+    fn parameters_key_does_not_replace_a_schema() {
+        let plain = json!({
+            "type": "object",
+            "properties": {"n": {"type": "integer"}}
+        });
+        let repaired = normalize(&json!({"n": "1"}), &plain).expect("integer property");
+        assert_eq!(repaired.value["n"], 1);
+
+        let nested = json!({
+            "type": "object",
+            "properties": {
+                "n": {"type": "integer", "parameters": {"type": "string"}}
+            }
+        });
+        let repaired = normalize(&json!({"n": "1"}), &nested).expect("nested parameters");
+        assert_eq!(repaired.value["n"], 1);
+
+        let root = json!({"type": "integer", "parameters": {"type": "string"}});
+        let repaired = normalize(&json!("1"), &root).expect("root integer");
+        assert_eq!(repaired.value, 1);
+
+        let enumerated = json!({"enum": [1], "parameters": {"type": "string"}});
+        let repaired = normalize(&json!("1"), &enumerated).expect("enum");
+        assert_eq!(repaired.value, 1);
+
+        let constant = json!({"const": 1, "parameters": {"type": "string"}});
+        let repaired = normalize(&json!("1"), &constant).expect("const");
+        assert_eq!(repaired.value, 1);
+
+        let combined = json!({
+            "allOf": [{"type": "integer"}],
+            "parameters": {"type": "string"}
+        });
+        let repaired = normalize(&json!("1"), &combined).expect("allOf");
+        assert_eq!(repaired.value, 1);
+
+        let conditioned = json!({
+            "type": "integer",
+            "if": {"minimum": 0},
+            "then": {"maximum": 3},
+            "parameters": {"type": "string"}
+        });
+        let err = normalize(&json!("9"), &conditioned).expect_err("then maximum");
+        assert!(
+            err.to_string().contains("outside the schema bounds"),
+            "{err}"
+        );
+
+        let names = json!({
+            "additionalProperties": {"type": "integer"},
+            "propertyNames": {"maxLength": 1},
+            "parameters": {"additionalProperties": {"type": "integer"}}
+        });
+        let err = normalize(&json!({"ab": "1"}), &names).expect_err("long name");
+        assert_eq!(
+            err.to_string(),
+            "coerced value has a property name outside the schema"
+        );
+
+        let extras = json!({
+            "type": "object",
+            "additionalProperties": {"type": "integer"},
+            "parameters": {"patternProperties": {"^n": {"type": "string"}}}
+        });
+        let repaired = normalize(&json!({"n": "1"}), &extras).expect("additional integer");
+        assert_eq!(repaired.value["n"], 1);
+
+        let dependent = json!({
+            "type": "object",
+            "dependentSchemas": {
+                "flag": {"properties": {"n": {"type": "integer"}}}
+            },
+            "parameters": {"type": "object"}
+        });
+        let repaired = normalize(&json!({"flag": true, "n": "1"}), &dependent).expect("dependent");
+        assert_eq!(repaired.value["n"], 1);
+
+        let items = json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "parameters": {"items": {"type": "string"}}
+        });
+        let repaired = normalize(&json!(["1"]), &items).expect("items");
+        assert_eq!(repaired.value[0], 1);
+
+        let described = json!({
+            "name": "t",
+            "description": "read a file",
+            "parameters": {
+                "type": "object",
+                "properties": {"n": {"type": "integer"}}
+            }
+        });
+        let repaired = normalize(&json!({"n": "1"}), &described).expect("tool description");
+        assert_eq!(repaired.value["n"], 1);
+    }
+
+    #[test]
     fn parameters_wrapper_keeps_if_not_and_one_of() {
         let input = json!({"a": "5"});
 

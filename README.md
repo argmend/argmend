@@ -84,7 +84,7 @@ Pass a tool schema with `repair_args` when you have one. A value nested more tha
 Argmend reads the schema from:
 
 - the object you pass, when that object is already a JSON Schema
-- a `parameters` object, when the outer object has no `properties` map
+- a `parameters` object, when the outer object is not already a JSON Schema (`name` and `description` still unwrap)
 - OpenAI `function.parameters`
 - Anthropic `input_schema`
 - MCP `inputSchema`
