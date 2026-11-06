@@ -45,6 +45,9 @@ pub enum RepairOutcome {
 pub struct Rewrite {
     pub kind: RewriteKind,
     pub detail: String,
+    /// JSON pointer for a schema rewrite, such as `/a`. Syntax repairs
+    /// leave this empty until the value exists.
+    pub pointer: Option<String>,
 }
 
 /// Why a rewrite was applied.
@@ -320,6 +323,7 @@ fn note(kind: RewriteKind, detail: &str) -> Rewrite {
     Rewrite {
         kind,
         detail: detail.to_string(),
+        pointer: None,
     }
 }
 
@@ -422,6 +426,7 @@ pub fn repair_args(request: &RepairRequest<'_>) -> Result<Repaired, RepairError>
             rewrites: vec![Rewrite {
                 kind: RewriteKind::Empty,
                 detail: detail.into(),
+                pointer: None,
             }],
         };
         if let Some(schema) = request.schema {
@@ -1225,6 +1230,60 @@ mod tests {
     }
 
     #[test]
+    fn one_of_does_not_drop_a_key_when_the_branch_still_misses() {
+        let schema = json!({
+            "oneOf": [{
+                "additionalProperties": false,
+                "allOf": [{"properties": {"a": {"type": "integer"}}}],
+                "properties": {"n": {"type": "string"}},
+                "type": "object"
+            }, {
+                "additionalProperties": false,
+                "properties": {"b": {"allOf": [{"type": "integer"}, {"type": "integer"}]}},
+                "type": "object"
+            }]
+        });
+        let value = json!({"b": null, "n": null});
+        let repaired = normalize(&value, &schema).expect("both branches miss");
+        assert_eq!(repaired.value, value);
+        assert!(repaired.rewrites.is_empty(), "{repaired:?}");
+    }
+
+    #[test]
+    fn number_string_rewrite_points_at_the_property() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"type": "integer", "maximum": 3}}
+        });
+        let repaired = normalize(&json!({"a": "1"}), &schema).expect("inside");
+        assert_eq!(repaired.value["a"], 1);
+        let note = repaired
+            .rewrites
+            .iter()
+            .find(|item| item.kind == RewriteKind::NumberString)
+            .expect("number string");
+        assert_eq!(note.detail, "integer string 1");
+        assert_eq!(note.pointer.as_deref(), Some("/a"));
+
+        let err = normalize(&json!({"a": "9"}), &schema).expect_err("bound");
+        let text = err.to_string();
+        assert!(text.contains("/a"), "{text}");
+        assert!(text.contains("outside the schema bounds"), "{text}");
+    }
+
+    #[test]
+    fn syntax_repair_keeps_its_sentence_without_a_pointer() {
+        match repair_json("{a: 1}") {
+            RepairOutcome::Repaired { repairs, .. } => {
+                assert!(repairs.iter().any(|item| {
+                    item.pointer.is_none() && item.detail.contains("quoted bare keys")
+                }));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn option_turns_off_path_backslashes_only() {
         let raw = r#"{path: "C:\temp\file"}"#;
         let on = repair_args(&RepairRequest::new("read", raw, None)).expect("on");
@@ -1732,7 +1791,7 @@ mod tests {
             "additionalProperties": false
         });
         let err = normalize(&json!({"content": "50", "text": "1"}), &schema).expect_err("both");
-        assert!(err.to_string().contains("'content'"), "{err}");
+        assert!(err.to_string().contains("/content"), "{err}");
         let late = json!({
             "type": "object",
             "properties": {
@@ -1741,9 +1800,9 @@ mod tests {
             "additionalProperties": false
         });
         let err = normalize(&json!({"z": "50", "a": "1"}), &late).expect_err("alias first");
-        assert!(err.to_string().contains("'z'"), "{err}");
+        assert!(err.to_string().contains("/z"), "{err}");
         let err = normalize(&json!({"text": "50"}), &schema).expect_err("alias");
-        assert!(err.to_string().contains("'text'"), "{err}");
+        assert!(err.to_string().contains("/text"), "{err}");
     }
 
     #[test]
@@ -4382,11 +4441,11 @@ mod tests {
             }
         });
         let err = normalize(&json!({"age": "200", "score": "3"}), &schema).expect_err("age");
-        assert!(err.to_string().contains("'age'"), "{err}");
+        assert!(err.to_string().contains("/age"), "{err}");
         let err = normalize(&json!({"age": "20", "score": "30"}), &schema).expect_err("score");
         let text = err.to_string();
-        assert!(text.contains("'score'"), "{err}");
-        assert!(!text.contains("'age'"), "{err}");
+        assert!(text.contains("/score"), "{err}");
+        assert!(!text.contains("/age"), "{err}");
 
         let root = json!({"type": "integer", "maximum": 10});
         let err = normalize(&json!("50"), &root).expect_err("root");
@@ -5017,7 +5076,7 @@ mod tests {
         });
         let err = normalize(&json!({"n": "9"}), &property_any).expect_err("property anyOf");
         let text = err.to_string();
-        assert!(text.contains("'n'"), "{err}");
+        assert!(text.contains("/n"), "{err}");
         assert!(text.contains("outside the schema bounds"), "{err}");
         let repaired = normalize(&json!({"n": "2"}), &property_any).expect("property anyOf inside");
         assert_eq!(repaired.value["n"], 2);

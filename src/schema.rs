@@ -477,7 +477,9 @@ fn exclusive_branch(
     for branch in branches {
         match normalize_child(value, branch, options) {
             Ok((next, rewrites)) => {
-                if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
+                // `branch_accepts` does not enter `allOf`. A branch can
+                // drop a key and still miss, and that drop must not win.
+                if accepts_with_applicators(branch, &next) && branch_accepts(schema, &next) {
                     matched.push((next, rewrites));
                 }
             }
@@ -1937,13 +1939,15 @@ fn normalize_array(
         let mut rewrites = Vec::new();
         for (index, item) in arr.iter().enumerate() {
             if let Some(position) = positions.get(index) {
-                let (next, more) = normalize_child(item, position, options)
+                let (next, mut more) = normalize_child(item, position, options)
                     .map_err(|err| prefix_index_error(index, err))?;
+                place_pointer(&mut more, &format!("/{index}"));
                 rewrites.extend(more);
                 out.push(next);
             } else if let ArrayTail::Schema(rest) = tail {
-                let (next, more) = normalize_child(item, rest, options)
+                let (next, mut more) = normalize_child(item, rest, options)
                     .map_err(|err| prefix_index_error(index, err))?;
+                place_pointer(&mut more, &format!("/{index}"));
                 rewrites.extend(more);
                 out.push(next);
             } else {
@@ -1966,8 +1970,9 @@ fn normalize_array(
     let mut out = Vec::with_capacity(arr.len());
     let mut rewrites = Vec::new();
     for (index, item) in arr.iter().enumerate() {
-        let (next, more) =
+        let (next, mut more) =
             normalize_child(item, items, options).map_err(|err| prefix_index_error(index, err))?;
+        place_pointer(&mut more, &format!("/{index}"));
         rewrites.extend(more);
         out.push(next);
     }
@@ -1976,7 +1981,7 @@ fn normalize_array(
 
 /// Name the property on an ambiguous child error. Other variants stay as they are.
 fn prefix_property_error(key: &str, err: RepairError) -> RepairError {
-    prefix_ambiguous(&format!("'{key}'"), err)
+    prefix_ambiguous(&pointer_token(key), err)
 }
 
 /// Name the array index on an ambiguous child error. Other variants stay as they are.
@@ -2009,8 +2014,9 @@ fn normalize_object(
 
     for (key, val) in obj {
         if let Some(prop_schema) = props.get(key) {
-            let (next, more) = normalize_child(val, prop_schema, options)
+            let (next, mut more) = normalize_child(val, prop_schema, options)
                 .map_err(|err| prefix_property_error(key, err))?;
+            place_pointer(&mut more, &pointer_token(key));
             rewrites.extend(more);
             out.insert(key.clone(), next);
             continue;
@@ -2067,8 +2073,9 @@ fn normalize_object(
                     unknown.push((key.clone(), val.clone()));
                     continue;
                 };
-                let (next, more) = normalize_child(val, prop_schema, options)
+                let (next, mut more) = normalize_child(val, prop_schema, options)
                     .map_err(|err| prefix_property_error(key, err))?;
+                place_pointer(&mut more, &pointer_token(key));
                 rewrites.extend(more);
                 rewrites.push(rewrite(
                     RewriteKind::Alias,
@@ -3264,5 +3271,22 @@ fn is_decimal_token(text: &str) -> bool {
 }
 
 fn rewrite(kind: RewriteKind, detail: String) -> Rewrite {
-    Rewrite { kind, detail }
+    Rewrite {
+        kind,
+        detail,
+        pointer: None,
+    }
+}
+
+fn pointer_token(key: &str) -> String {
+    format!("/{}", key.replace('~', "~0").replace('/', "~1"))
+}
+
+fn place_pointer(rewrites: &mut [Rewrite], token: &str) {
+    for item in rewrites {
+        item.pointer = Some(match item.pointer.take() {
+            Some(child) => format!("{token}{child}"),
+            None => token.to_string(),
+        });
+    }
 }
