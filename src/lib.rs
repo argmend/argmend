@@ -3,6 +3,10 @@
 //! Callers pass the raw argument string and, when they have it, the tool's
 //! JSON schema.
 //!
+//! Match [`RepairOutcome`], [`RewriteKind`], and [`RepairError`] with a
+//! wildcard arm. A later release can add a variant. Build [`RepairRequest`]
+//! with [`RepairRequest::new`] so a new field is not required.
+//!
 //! [`repair_args`] and [`normalize`] produce JSON. A successful result is
 //! not a promise that the schema accepts it. The host still validates
 //! before it runs a tool.
@@ -16,7 +20,10 @@ use serde_json::Value;
 pub use schema::normalize;
 
 /// Result of [`repair_json`].
+///
+/// Match this with a wildcard arm. A later release can add a variant.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RepairOutcome {
     /// The input parsed. Nothing was rewritten.
     Valid(Value),
@@ -29,14 +36,20 @@ pub enum RepairOutcome {
 }
 
 /// One recorded rewrite. Valid JSON that needs no schema change has none.
+///
+/// A later release can add a field. A pattern outside this crate needs `..`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Rewrite {
     pub kind: RewriteKind,
     pub detail: String,
 }
 
 /// Why a rewrite was applied.
+///
+/// Match this with a wildcard arm. A later release can add a variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RewriteKind {
     Syntax,
     Fence,
@@ -51,22 +64,42 @@ pub enum RewriteKind {
 }
 
 /// Arguments plus an optional JSON schema.
+///
+/// Build this with [`RepairRequest::new`]. A later field is not required.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct RepairRequest<'a> {
     pub tool_name: &'a str,
     pub raw: &'a str,
     pub schema: Option<&'a Value>,
 }
 
+impl<'a> RepairRequest<'a> {
+    /// One tool call. `schema` is `None` when the host has no schema.
+    pub fn new(tool_name: &'a str, raw: &'a str, schema: Option<&'a Value>) -> Self {
+        Self {
+            tool_name,
+            raw,
+            schema,
+        }
+    }
+}
+
 /// A value the host can execute, with every rewrite that produced it.
+///
+/// A later release can add a field. A pattern outside this crate needs `..`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Repaired {
     pub value: Value,
     pub rewrites: Vec<Rewrite>,
 }
 
 /// Repair refused. [`RepairError::Ambiguous`] is not a guess.
+///
+/// Match this with a wildcard arm. A later release can add a variant.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RepairError {
     #[error("{0}")]
     Unfixable(String),
@@ -313,11 +346,7 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 ///     "properties": {"path": {"type": "string"}},
 ///     "required": ["path"]
 /// });
-/// let repaired = repair_args(&RepairRequest {
-///     tool_name: "read",
-///     raw: "{}",
-///     schema: Some(&schema),
-/// })
+/// let repaired = repair_args(&RepairRequest::new("read", "{}", Some(&schema)))
 /// .expect("missing required is still repairable");
 /// assert_eq!(repaired.value, json!({}));
 /// ```

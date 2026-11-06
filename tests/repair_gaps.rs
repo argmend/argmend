@@ -1203,17 +1203,9 @@ proptest! {
             if let RepairOutcome::Valid(value) | RepairOutcome::Repaired { value, .. } = repair_json(&raw) {
                 let _ = normalize(&value, chosen);
             }
-            let _ = repair_args(&RepairRequest {
-                tool_name: "probe",
-                raw: &raw,
-                schema: Some(chosen),
-            });
+            let _ = repair_args(&RepairRequest::new("probe", &raw, Some(chosen)));
         }
-        let _ = repair_args(&RepairRequest {
-            tool_name: "",
-            raw: &raw,
-            schema: None,
-        });
+        let _ = repair_args(&RepairRequest::new("", &raw, None));
     }
 
     #[test]
