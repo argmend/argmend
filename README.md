@@ -49,6 +49,26 @@ cargo run --example repair
 
 Pass a tool schema with `repair_args` when you have one. A value nested more than 128 arrays or objects is an error. `repair_args` uses that same limit. A `parameters` object is that schema when the outer object has no `properties` map, and `if`, `then`, `not`, and `oneOf` on it still apply. Blank input becomes `{}`, `[]`, or null, matching the schema type. A string, number, or boolean is not invented.
 
+## Already parsed JSON
+
+`normalize` takes a parsed value and a schema. It does not read the original text.
+
+`{"n": "5"}` with an integer property `n` becomes `{"n": 5}`. The rewrite kind is `NumberString`, and the note is `integer string 5`.
+
+## Path names and aliases
+
+These names rename to the one matching path property in the schema: `path`, `file`, `file_path`, `filepath`, and `path_name`.
+
+`{"file": "a.rs"}` against a `path` string property becomes `{"path": "a.rs"}`. The rewrite kind is `Alias`, and the note is `renamed file to path`.
+
+That rename is refused, and the result is ambiguous, when:
+
+- a schema branch lists that key under `properties`
+- `patternProperties` may own the key
+- the key matches more than one property
+
+`x-aliases` adds names for one property. A `content` property with `"x-aliases": ["text"]` turns `{"text": "hi"}` into `{"content": "hi"}`. The note is `renamed text to content`. The same three refusals apply. The alias and the real key with different values are also ambiguous.
+
 ## What success does not mean
 
 `Ok` from `repair_args` means Argmend produced JSON. It does not mean the schema accepts that JSON. Validate the value before you run the tool.

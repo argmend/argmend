@@ -1,8 +1,7 @@
 //! Argmend repairs broken tool-call arguments into JSON.
 //!
-//! The crate does not know about Bline errors, chat requests, or the tool
-//! catalog. Callers pass the raw argument string and, when they have it,
-//! the tool's JSON schema.
+//! Callers pass the raw argument string and, when they have it, the tool's
+//! JSON schema.
 //!
 //! [`repair_args`] and [`normalize`] produce JSON. A successful result is
 //! not a promise that the schema accepts it. The host still validates
