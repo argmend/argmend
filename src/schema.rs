@@ -855,7 +855,7 @@ fn i64_against_schema_bounds(schema: &Value, int: i64) -> Option<bool> {
         let Some(bound) = schema.get(key) else {
             continue;
         };
-        if bound.is_boolean() || i64_bound_known(schema, key, bound) {
+        if bound.is_boolean() || i64_bound_known(schema, key, bound, int) {
             continue;
         }
         if bound.as_f64().is_some_and(f64::is_finite) {
@@ -865,12 +865,13 @@ fn i64_against_schema_bounds(schema: &Value, int: i64) -> Option<bool> {
     Some(false)
 }
 
-fn i64_bound_known(schema: &Value, key: &str, bound: &Value) -> bool {
+fn i64_bound_known(schema: &Value, key: &str, bound: &Value, int: i64) -> bool {
     schema_i64_limit(schema, key).is_some()
         || bound.as_u64().is_some()
         || finite_below_every_i64(bound)
         || finite_above_every_i64(bound)
         || comparable_f64_bound(bound).is_some()
+        || coarse_i64_f64(int, bound).is_some()
 }
 
 fn comparable_f64_bound(bound: &Value) -> Option<f64> {
@@ -913,6 +914,8 @@ fn bound_fails(schema: &Value, int: i64, key: &str, exclusive: bool, low: bool) 
         Ordering::Less
     } else if let Some(limit) = comparable_f64_bound(bound) {
         cmp_i64_f64(int, limit)
+    } else if let Some(order) = coarse_i64_f64(int, bound) {
+        order
     } else {
         return false;
     };
@@ -975,7 +978,7 @@ fn u64_against_schema_bounds(schema: &Value, int: u64) -> Option<bool> {
         let Some(bound) = schema.get(key) else {
             continue;
         };
-        if bound.is_boolean() || u64_bound_known(bound) {
+        if bound.is_boolean() || u64_bound_known(bound, int) {
             continue;
         }
         if bound.as_f64().is_some_and(f64::is_finite) {
@@ -985,12 +988,13 @@ fn u64_against_schema_bounds(schema: &Value, int: u64) -> Option<bool> {
     Some(false)
 }
 
-fn u64_bound_known(bound: &Value) -> bool {
+fn u64_bound_known(bound: &Value, int: u64) -> bool {
     bound.as_i64().is_some()
         || bound.as_u64().is_some()
         || finite_below_every_u64(bound)
         || finite_above_every_u64(bound)
         || comparable_f64_bound(bound).is_some()
+        || coarse_u64_f64(int, bound).is_some()
 }
 
 fn u64_outside_bounds(schema: &Value, int: u64) -> bool {
@@ -1047,8 +1051,51 @@ fn cmp_u64_bound(int: u64, bound: &Value) -> Option<Ordering> {
     if finite_above_every_u64(bound) {
         return Some(Ordering::Less);
     }
-    let limit = comparable_f64_bound(bound)?;
-    Some(cmp_u64_f64(int, limit))
+    if let Some(limit) = comparable_f64_bound(bound) {
+        return Some(cmp_u64_f64(int, limit));
+    }
+    coarse_u64_f64(int, bound)
+}
+
+/// Order an integer against a power-of-ten bound whose integer part is
+/// not exact. The two f64 values must be more than two ulps apart, so
+/// rounding cannot flip the result. `1e18` is above 2^53 and below 2^63.
+fn coarse_i64_f64(int: i64, bound: &Value) -> Option<Ordering> {
+    coarse_f64_order(int as f64, bound.as_f64()?)
+}
+
+fn coarse_u64_f64(int: u64, bound: &Value) -> Option<Ordering> {
+    let limit = bound.as_f64()?;
+    if limit < 0.0 {
+        return Some(Ordering::Greater);
+    }
+    coarse_f64_order(int as f64, limit)
+}
+
+fn coarse_f64_order(left: f64, right: f64) -> Option<Ordering> {
+    if !left.is_finite() || !right.is_finite() || left == right {
+        return None;
+    }
+    let gap = (left - right).abs();
+    let ulp = f64_ulp(left).max(f64_ulp(right));
+    if gap > ulp * 2.0 {
+        left.partial_cmp(&right)
+    } else {
+        None
+    }
+}
+
+fn f64_ulp(number: f64) -> f64 {
+    let abs = number.abs();
+    if abs == 0.0 || !abs.is_finite() {
+        return f64::MIN_POSITIVE;
+    }
+    let up = abs.next_up();
+    if up.is_finite() {
+        up - abs
+    } else {
+        abs - abs.next_down()
+    }
 }
 
 fn cmp_u64_f64(int: u64, limit: f64) -> Ordering {

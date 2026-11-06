@@ -3752,6 +3752,29 @@ mod tests {
             err.to_string().contains("outside the schema bounds"),
             "{err}"
         );
+        // 1e18 is not an exact integer. An integer past 2^63 is still
+        // above it, and it is still below 1e19.
+        assert_bounds(
+            "9223372036854775809",
+            r#"{"type":"integer","maximum":1e18}"#,
+        );
+        assert_bounds(
+            "9223372036854775809",
+            r#"{"type":"integer","minimum":1e19}"#,
+        );
+        assert_bounds(
+            "9223372036854775807",
+            r#"{"type":"integer","maximum":1e18}"#,
+        );
+        assert_number(
+            "9223372036854775809",
+            r#"{"type":"integer","maximum":1e19}"#,
+        );
+        assert_number("9007199254740993", r#"{"type":"integer","maximum":1e18}"#);
+        assert_number(
+            "9223372036854775807",
+            r#"{"type":"integer","minimum":1e18}"#,
+        );
         assert_bounds(
             "18446744073709551615",
             r#"{"type":"integer","minimum":18446744073709551616}"#,
