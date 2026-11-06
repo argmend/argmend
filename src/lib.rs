@@ -10,7 +10,7 @@
 //! renames, or truncation closing. The default keeps those repairs on.
 //! `embedded_json` stays off. Set it to parse one JSON string when the
 //! schema type is an object or an array. `leading_prose` stays off.
-//! [`repair_json_with`] turns that extract on.
+//! [`repair_json_with`] turns that extract on. `wrap_scalar` stays off.
 //!
 //! [`repair_args`] and [`normalize`] produce JSON. A successful result is
 //! not a promise that the schema accepts it. The host still validates
@@ -70,14 +70,16 @@ pub enum RewriteKind {
     /// A JSON string became an object or an array.
     JsonString,
     DroppedUnknown,
+    /// A string, number, or bool became a one-element array.
+    WrappedScalar,
     Empty,
 }
 
 /// Which repairs [`repair_args`] may apply.
 ///
-/// Path, alias, and truncation repairs stay on. [`Self::embedded_json`]
-/// and [`Self::leading_prose`] stay off. Set one field to change that
-/// family. The other repairs still run.
+/// Path, alias, and truncation repairs stay on. [`Self::embedded_json`],
+/// [`Self::leading_prose`], and [`Self::wrap_scalar`] stay off. Set one
+/// field to change that family. The other repairs still run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RepairOptions {
@@ -97,11 +99,16 @@ pub struct RepairOptions {
     /// Off by default. [`repair_json`] leaves that text unfixable.
     /// [`repair_json_with`] turns the extract on.
     pub leading_prose: bool,
+    /// Wrap one string, number, or bool in an array when the schema type
+    /// is `array` and not also `object`.
+    ///
+    /// Off by default. A value that fails the item schema is ambiguous.
+    pub wrap_scalar: bool,
 }
 
 impl RepairOptions {
-    /// Path, alias, and truncation repairs stay on. `embedded_json` and
-    /// `leading_prose` stay off.
+    /// Path, alias, and truncation repairs stay on. `embedded_json`,
+    /// `leading_prose`, and `wrap_scalar` stay off.
     pub fn new() -> Self {
         Self::default()
     }
@@ -115,6 +122,7 @@ impl Default for RepairOptions {
             truncation: true,
             embedded_json: false,
             leading_prose: false,
+            wrap_scalar: false,
         }
     }
 }
@@ -1514,6 +1522,52 @@ mod tests {
                 .iter()
                 .all(|item| item.kind != RewriteKind::JsonString)
         );
+    }
+
+    #[test]
+    fn wrap_scalar_makes_one_array_item() {
+        let strings = json!({"type": "array", "items": {"type": "string"}});
+        let off = repair_args(&RepairRequest::new("t", r#""a""#, Some(&strings))).expect("off");
+        assert_eq!(off.value, "a");
+
+        let mut options = RepairOptions::new();
+        options.wrap_scalar = true;
+        let on =
+            repair_args(&RepairRequest::new("t", r#""a""#, Some(&strings)).with_options(options))
+                .expect("on");
+        assert_eq!(on.value, json!(["a"]));
+        assert!(on.rewrites.iter().any(|item| {
+            item.kind == RewriteKind::WrappedScalar && item.detail == "wrapped scalar in an array"
+        }));
+
+        let integers = json!({"type": "array", "items": {"type": "integer"}});
+        let coerced =
+            repair_args(&RepairRequest::new("t", r#""1""#, Some(&integers)).with_options(options))
+                .expect("integer item");
+        assert_eq!(coerced.value, json!([1]));
+
+        let err = repair_args(
+            &RepairRequest::new("t", r#""hello""#, Some(&integers)).with_options(options),
+        )
+        .expect_err("bad item");
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{err}");
+        assert!(err.to_string().contains("item schema"), "{err}");
+
+        let kept =
+            repair_args(&RepairRequest::new("t", r#"["a"]"#, Some(&strings)).with_options(options))
+                .expect("already an array");
+        assert_eq!(kept.value, json!(["a"]));
+        assert!(
+            kept.rewrites
+                .iter()
+                .all(|item| item.kind != RewriteKind::WrappedScalar)
+        );
+
+        let union = json!({"type": ["array", "object"]});
+        let objectish =
+            repair_args(&RepairRequest::new("t", r#""a""#, Some(&union)).with_options(options))
+                .expect("object union");
+        assert_eq!(objectish.value, "a");
     }
 
     #[test]

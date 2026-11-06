@@ -74,11 +74,13 @@ That rename is refused, and the result is ambiguous, when:
 
 ## Turning a repair off
 
-`RepairRequest::new` keeps path, alias, and truncation repairs on. `embedded_json` and `leading_prose` stay off. Build `RepairOptions::new`, set one field, and pass it to `with_options`. Pass the same options to `repair_json_with`.
+`RepairRequest::new` keeps path, alias, and truncation repairs on. `embedded_json`, `leading_prose`, and `wrap_scalar` stay off. Build `RepairOptions::new`, set one field, and pass it to `with_options`. Pass the same options to `repair_json_with`.
 
 `path_backslashes` set to `false` leaves a Windows path escape as that JSON escape. A bare key in the same text is still quoted. `aliases` set to `false` leaves `file` and an `x-aliases` name in place. `truncation` set to `false` leaves `{"file": "a.rs"` unfixable. A finished `{file: "a.rs"}` still repairs.
 
 `embedded_json` stays off. Set it to `true` to parse one JSON string when the schema type is `object` or `array` and `string` is not also allowed. `{"a":"{\"b\":1}"}` against an object property `a` becomes `{"a":{"b":1}}`. The rewrite kind is `JsonString`, and the note is `parsed json object`. A string that is not JSON stays that string. `normalize` keeps this off.
+
+`wrap_scalar` stays off. Set it to `true` to wrap one string, number, or bool when the schema type is `array` and not also `object`. `"a"` against an array of strings becomes `["a"]`. The item schema still applies, so `"1"` against an array of integers becomes `[1]`. A value that fails the item schema is ambiguous. An array that is already an array stays that array.
 
 ## What success does not mean
 
