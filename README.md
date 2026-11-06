@@ -13,9 +13,8 @@ Argmend repairs broken tool-call arguments into JSON.
 
 ## Install
 
-```toml
-[dependencies]
-argmend = "0.3"
+```text
+cargo add argmend
 ```
 
 Rust 1.95 or newer. The crate has no command-line program. Call it from your host.
