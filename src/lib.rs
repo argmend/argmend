@@ -3687,6 +3687,47 @@ mod tests {
             "9007199254740993",
             r#"{"type":"integer","minimum":9223372036854777856}"#,
         );
+        // -1e19 is below every i64. It must still reject, and it must
+        // not hide a maximum that this integer can be compared with.
+        assert_bounds("9007199254740993", r#"{"type":"integer","maximum":-1e19}"#);
+        assert_bounds(
+            "9007199254740993",
+            r#"{"type":"integer","exclusiveMaximum":-1e19}"#,
+        );
+        assert_bounds(
+            "9007199254740993.0",
+            r#"{"type":"integer","maximum":-1e19}"#,
+        );
+        assert_bounds(
+            "9007199254740993",
+            r#"{"type":"integer","minimum":-1e19,"maximum":10}"#,
+        );
+        assert_bounds(
+            "9223372036854775808",
+            r#"{"type":"integer","maximum":-1e19}"#,
+        );
+        assert_bounds(
+            "9223372036854775808",
+            r#"{"type":"integer","minimum":-1e19,"maximum":10}"#,
+        );
+        assert_number("5", r#"{"type":"integer","minimum":-1e19}"#);
+        assert_number("9007199254740993", r#"{"type":"integer","maximum":1e19}"#);
+        assert_number(
+            "9223372036854775808",
+            r#"{"type":"integer","maximum":1e20}"#,
+        );
+        assert_number("9007199254740993", r#"{"type":"integer","maximum":"10"}"#);
+        let schema = parsed(r#"{"type":"integer","minimum":-1e19,"maximum":10}"#);
+        let err = repair_args(&RepairRequest::new(
+            "read",
+            "\"9007199254740993\"",
+            Some(&schema),
+        ))
+        .expect_err("repair args");
+        assert!(
+            err.to_string().contains("outside the schema bounds"),
+            "{err}"
+        );
         assert_bounds(
             "18446744073709551615",
             r#"{"type":"integer","minimum":18446744073709551616}"#,
