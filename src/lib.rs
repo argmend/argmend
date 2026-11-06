@@ -4379,6 +4379,27 @@ mod tests {
     }
 
     #[test]
+    fn if_all_of_miss_does_not_apply_then() {
+        let schema = json!({
+            "if": {"allOf": [{"type": "integer"}, {"type": "integer"}]},
+            "then": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"a": {"type": "null"}}
+            },
+            "else": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"b": {"type": "integer"}}
+            }
+        });
+        let value = json!({"a": null, "b": null});
+        let repaired = normalize(&value, &schema).expect("if miss");
+        assert_eq!(repaired.value, value);
+        assert!(repaired.rewrites.is_empty());
+    }
+
+    #[test]
     fn string_keywords_are_not_skipped_by_coercion() {
         let long = json!({"type": "integer", "minLength": 5});
         let err = normalize(&json!("1"), &long).expect_err("short");

@@ -32,6 +32,9 @@ pub(crate) const NORMALIZE_DEPTH_LIMIT: usize = 128;
 ///
 /// When this object has no `properties` map, a `parameters` object is the
 /// schema. `if` / `then`, `not`, and `oneOf` on that inner object still apply.
+/// An `if` schema that does not match does not apply `then`. `allOf`,
+/// `oneOf`, `anyOf`, and a nested `if` inside that condition count.
+/// `else` runs, or the value stays.
 ///
 /// An array or object nested more than 128 levels returns an error
 /// (`value is nested too deeply`). [`crate::repair_args`] calls this
@@ -248,6 +251,9 @@ fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
 /// When `if` matches, apply `then`. Otherwise apply `else`.
 /// The `then` result must still match `if`.
 /// A refusing `if` probe does not match, so `else` still runs.
+/// `allOf`, `oneOf`, `anyOf`, and a nested `if` are part of that answer
+/// for `if`, `then`, and `else`. [`branch_accepts`] does not enter them,
+/// so those checks use [`settled`].
 /// An error from the matched branch is kept when that side still applies.
 /// It is dropped only when a keyword outside `if`, `then`, and `else`
 /// rewrites the value onto the other side.
@@ -277,7 +283,7 @@ fn if_then_else(
         return Ok(None);
     }
     let if_hit = match normalize_child(value, if_schema) {
-        Ok((probed, probe_rewrites)) if branch_accepts(if_schema, &probed) => {
+        Ok((probed, probe_rewrites)) if accepts_with_applicators(if_schema, &probed) => {
             Some((probed, probe_rewrites))
         }
         _ => None,
@@ -294,13 +300,15 @@ fn if_then_else(
             Err(err) => return discard_conditional_error(value, schema, true, err),
         };
         let coerced = probed != *value || !probe_rewrites.is_empty();
-        if !branch_accepts(then_schema, &next) && coerced {
+        if !accepts_with_applicators(then_schema, &next) && coerced {
             // The `if` probe already coerced, so `then` did not see the original value.
             if let Err(err) = normalize_child(value, then_schema) {
                 return discard_conditional_error(value, schema, true, err);
             }
         }
-        if !branch_accepts(if_schema, &next) || !branch_accepts(then_schema, &next) {
+        if !accepts_with_applicators(if_schema, &next)
+            || !accepts_with_applicators(then_schema, &next)
+        {
             return Ok(None);
         }
         let mut rewrites = probe_rewrites;
@@ -317,13 +325,25 @@ fn if_then_else(
         Ok(pair) => pair,
         Err(err) => return discard_conditional_error(value, schema, false, err),
     };
-    if !branch_accepts(else_schema, &next) {
+    if !accepts_with_applicators(else_schema, &next) {
         return Ok(None);
     }
     if next == *value && rewrites.is_empty() {
         return Ok(None);
     }
     Ok(Some((next, rewrites)))
+}
+
+/// `branch_accepts` does not enter `allOf`, `oneOf`, `anyOf`, or `if`.
+/// Those keywords still decide whether `if`, `then`, or `else` matched.
+/// An unchecked `pattern`, `format`, or `$ref` stays inconclusive and
+/// falls back to [`branch_accepts`].
+fn accepts_with_applicators(schema: &Value, value: &Value) -> bool {
+    match settled(schema, value) {
+        Settled::Yes => true,
+        Settled::No(_) => false,
+        Settled::Inconclusive => branch_accepts(schema, value),
+    }
 }
 
 /// Keep a `then` or `else` error when `if` still selects that side.
