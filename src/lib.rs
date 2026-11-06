@@ -2619,6 +2619,12 @@ mod tests {
             }
             other => panic!("path name -> {other:?}"),
         }
+        match repair_json(r#"{"path":"C:\Users\Ren\'é"}"#) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\Ren\u{0027}\u{00e9}", "{value}");
+            }
+            other => panic!("unicode name -> {other:?}"),
+        }
         match repair_json(r#"{"path":"C:\Users\'"}"#) {
             RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
                 assert_eq!(value["path"], "C:\\Users\\'", "{value}");

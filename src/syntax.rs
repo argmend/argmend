@@ -1500,7 +1500,7 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
         let apostrophe_in_name = body.get(index + 1) == Some(&'\'')
             && body
                 .get(index + 2)
-                .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_');
+                .is_some_and(|ch| ch.is_alphanumeric() || *ch == '_');
         if (!in_path && body.get(index + 1) == Some(&'\'')) || (in_path && apostrophe_in_name) {
             out.push('\'');
             dropped_apostrophe = true;
@@ -3724,6 +3724,16 @@ mod tests {
                 assert_eq!(value["2"], 3);
             }
             other => panic!("numeric key after a comma -> {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{a:{b:1 2 3}}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{a:[1 2 3]}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], serde_json::json!([1, 2, 3]));
+            }
+            other => panic!("array commas -> {other:?}"),
         }
         assert!(matches!(
             repair_tool_call_json(r#"{tel: +1 555 1234}"#),
