@@ -195,6 +195,19 @@ class ApplyReleaseNotesTests(unittest.TestCase):
         self.assertIn("publisher/scripts/apply-release-notes.sh", rel)
         self.assertIn("continue-on-error: true", rel)
 
+    def test_rust_cache_workspace_only_on_publish_jobs(self) -> None:
+        action = (
+            ROOT / ".github" / "actions" / "setup-rust" / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('default: "."', action)
+        self.assertIn("workspaces: ${{ inputs.workspace }}", action)
+        for name in ("publish-crates.yml", "release.yml"):
+            text = (WORKFLOWS / name).read_text(encoding="utf-8")
+            self.assertIn("workspace: crate", text)
+        for name in ("ci.yml", "coverage.yml", "fuzz.yml"):
+            text = (WORKFLOWS / name).read_text(encoding="utf-8")
+            self.assertNotIn("workspace:", text)
+
 
 if __name__ == "__main__":
     unittest.main()

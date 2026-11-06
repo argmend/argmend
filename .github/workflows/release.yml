@@ -76,6 +76,8 @@ jobs:
           ref: ${{ env.TAG }}
           path: crate
       - uses: ./publisher/.github/actions/setup-rust
+        with:
+          workspace: crate
       - name: Package, SBOM, and provenance
         working-directory: crate
         run: |
