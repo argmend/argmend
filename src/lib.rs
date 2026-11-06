@@ -11,6 +11,8 @@
 //! `embedded_json` stays off. Set it to parse one JSON string when the
 //! schema type is an object or an array. `leading_prose` stays off.
 //! [`repair_json_with`] turns that extract on. `wrap_scalar` stays off.
+//! [`normalize`] uses those defaults. [`normalize_with`] is the same
+//! call with explicit switches.
 //!
 //! [`repair_args`] and [`normalize`] produce JSON. A successful result is
 //! not a promise that the schema accepts it. The host still validates
@@ -22,7 +24,7 @@ mod syntax;
 
 use serde_json::Value;
 
-pub use schema::{normalize, tool_schema};
+pub use schema::{normalize, normalize_with, tool_schema};
 
 /// Result of [`repair_json`].
 ///
@@ -6392,6 +6394,48 @@ mod tests {
             err.to_string().contains("unrecognized MCP tool definition"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn normalize_with_keeps_embedded_json_and_wrap_scalar_off() {
+        let object = json!({
+            "type": "object",
+            "properties": {"payload": {"type": "object"}}
+        });
+        let value = json!({"payload": "{\"a\":1}"});
+        let kept = normalize(&value, &object).expect("default embedded");
+        assert_eq!(kept.value["payload"], "{\"a\":1}");
+
+        let mut options = RepairOptions::new();
+        options.embedded_json = true;
+        let parsed = normalize_with(&value, &object, options).expect("embedded");
+        assert_eq!(parsed.value["payload"]["a"], 1);
+        assert!(
+            parsed
+                .rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::JsonString)
+        );
+
+        let strings = json!({"type": "array", "items": {"type": "string"}});
+        let kept = normalize(&json!("a"), &strings).expect("default wrap");
+        assert_eq!(kept.value, "a");
+        options.embedded_json = false;
+        options.wrap_scalar = true;
+        let wrapped = normalize_with(&json!("a"), &strings, options).expect("wrap");
+        assert_eq!(wrapped.value, json!(["a"]));
+
+        let paths = json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}}
+        });
+        let renamed = normalize(&json!({"file": "a.rs"}), &paths).expect("alias on");
+        assert_eq!(renamed.value["path"], "a.rs");
+        options.wrap_scalar = false;
+        options.aliases = false;
+        let left = normalize_with(&json!({"file": "a.rs"}), &paths, options).expect("alias off");
+        assert_eq!(left.value["file"], "a.rs");
+        assert!(left.rewrites.is_empty());
     }
 
     #[test]

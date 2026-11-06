@@ -112,7 +112,9 @@ fn main() {
 
 ## Already parsed JSON
 
-`normalize` takes a parsed value and a schema. It does not read the original text.
+`normalize` takes a parsed value and a schema. It does not read the original text. It uses the default repair switches: path, alias, and truncation stay on, and `embedded_json`, `leading_prose`, and `wrap_scalar` stay off.
+
+`normalize_with` is that call plus `RepairOptions`. Set `embedded_json` or `wrap_scalar` there when the value is already JSON.
 
 `{"n": "5"}` with an integer property `n` becomes `{"n": 5}`. The rewrite kind is `NumberString`, the note is `integer string 5`, and the pointer is `/n`.
 
@@ -154,7 +156,7 @@ fn main() {
 | `leading_prose` | off | `true` extracts one object or array after a prefix, a word before a fence, or a `<tool_call>` tag. |
 | `wrap_scalar` | off | `true` wraps one string, number, or bool when the schema type is `array` and not also `object`. |
 
-`embedded_json` example: `{"a":"{\"b\":1}"}` against an object property `a` becomes `{"a":{"b":1}}`. The rewrite kind is `JsonString`, and the note is `parsed json object`. A string that is not JSON stays that string. `normalize` keeps this off.
+`embedded_json` example: `{"a":"{\"b\":1}"}` against an object property `a` becomes `{"a":{"b":1}}`. The rewrite kind is `JsonString`, and the note is `parsed json object`. A string that is not JSON stays that string. `normalize` keeps this off. `normalize_with` turns it on when that field is set.
 
 `wrap_scalar` example: `"a"` against an array of strings becomes `["a"]`. The item schema still applies, so `"1"` against an array of integers becomes `[1]`. A value that fails the item schema is ambiguous. An array that is already an array stays that array.
 

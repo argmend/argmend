@@ -27,7 +27,10 @@ pub(crate) const NORMALIZE_DEPTH_LIMIT: usize = 128;
 /// A JSON boolean schema is unused. `true` and `false` both return the
 /// value with no rewrites. A string whose text is JSON stays a string when
 /// the schema type is an object or an array. `RepairOptions::embedded_json`
-/// parses that string once. [`normalize`] leaves the option off. `$ref` and
+/// parses that string once. [`normalize`] leaves that option off, and it
+/// leaves [`RepairOptions::wrap_scalar`] off. [`normalize_with`] takes
+/// the same switches. Path backslashes, alias renames, and truncation
+/// stay on unless the caller turns them off. `$ref` and
 /// `$dynamicRef` are not resolved. They do not veto a sibling `type`, and
 /// they do not hide a sibling bound such as `maximum`.
 ///
@@ -55,7 +58,31 @@ pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError>
     normalize_with(value, schema, RepairOptions::default())
 }
 
-pub(crate) fn normalize_with(
+/// [`normalize`] with explicit repair switches.
+///
+/// [`RepairOptions::default`] keeps path backslashes, alias renames, and
+/// truncation on. `embedded_json`, `leading_prose`, and `wrap_scalar`
+/// stay off until the caller sets them. [`normalize`] does not turn
+/// those three on.
+///
+/// ```
+/// use argmend::{normalize_with, RepairOptions};
+/// use serde_json::json;
+///
+/// let schema = json!({
+///     "type": "object",
+///     "properties": {"payload": {"type": "object"}}
+/// });
+/// let value = json!({"payload": "{\"a\":1}"});
+/// let kept = argmend::normalize(&value, &schema).expect("default");
+/// assert_eq!(kept.value["payload"], "{\"a\":1}");
+///
+/// let mut options = RepairOptions::new();
+/// options.embedded_json = true;
+/// let repaired = normalize_with(&value, &schema, options).expect("parsed");
+/// assert_eq!(repaired.value["payload"]["a"], 1);
+/// ```
+pub fn normalize_with(
     value: &Value,
     schema: &Value,
     options: RepairOptions,
