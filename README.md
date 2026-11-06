@@ -48,13 +48,67 @@ That program is [examples/repair.rs](examples/repair.rs). Run it with:
 cargo run --example repair
 ```
 
-`Valid` means the text parsed and Argmend did not rewrite it. `Repaired` means Argmend rewrote the text and then parsed it. A Windows path whose backslash was a JSON escape is one of those rewrites. A newline after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays a newline. A number that is the last character, such as `{"a": 12`, stays unfixable. The same number followed by a space or a newline is closed. Text before the value stays unfixable, as in `Here is the call: {"a": 1}`. A word before a markdown fence stays unfixable. A fence that starts the input is unwrapped. A `<tool_call>` tag around the value stays unfixable. `leading_prose` extracts one object or array from those three. `Here {"a":1} {"b":2}` stays unfixable. Text after one object or array is removed: `{"a": 1}` followed by `Done.` is repaired, and the note is `removed trailing prose`. `Unfixable` means Argmend could not produce one JSON value. `Ambiguous` means more than one repair was possible, so none was chosen.
+### Outcomes
 
-Pass a tool schema with `repair_args` when you have one. A value nested more than 128 arrays or objects is an error. `repair_args` uses that same limit. A `parameters` object is that schema when the outer object has no `properties` map, and `if`, `then`, `not`, and `oneOf` on it still apply. OpenAI `function.parameters`, Anthropic `input_schema`, and MCP `inputSchema` are that schema too. `{"a":"1"}` against an integer property `a` becomes `{"a": 1}`. Those applicators still apply inside the extracted schema. A `type: function` object with no parameters object is unfixable (`unrecognized OpenAI tool definition`). Blank input against `{"type":"function","parameters":{"type":"object"}}` is `{}`, not a failure of the type `function`. Any other object is still the schema itself. Blank input becomes `{}`, `[]`, or null, matching the schema type. A string, number, or boolean is not invented.
+| Variant | Meaning |
+| --- | --- |
+| `Valid` | The text parsed, and Argmend did not rewrite it. |
+| `Repaired` | Argmend rewrote the text, then parsed it. |
+| `Unfixable` | Argmend could not produce one JSON value. |
+| `Ambiguous` | More than one repair was possible, so none was chosen. |
+
+A Windows path whose backslash was a JSON escape is a `Repaired` result.
+
+### Numbers and paths
+
+- A newline after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays a newline.
+- A number that is the last character, such as `{"a": 12`, stays unfixable.
+- The same number followed by a space or a newline is closed.
+
+### Text around the value
+
+`repair_json` leaves text before the value unfixable:
+
+- `Here is the call: {"a": 1}`
+- a word before a markdown fence
+- a `<tool_call>` tag around the value
+
+A fence that starts the input is unwrapped. Text after one object or array is removed: `{"a": 1}` followed by `Done.` is repaired, and the note is `removed trailing prose`.
+
+`leading_prose` extracts one object or array from a prefix, a word before a fence, or a `<tool_call>` tag. It stays off. `Here {"a":1} {"b":2}` stays unfixable. See [Turning a repair off](#turning-a-repair-off).
+
+## Pass a schema
+
+Pass a tool schema with `repair_args` when you have one. A value nested more than 128 arrays or objects is an error. `repair_args` uses that same limit.
+
+Argmend reads the schema from:
+
+- the object you pass, when that object is already a JSON Schema
+- a `parameters` object, when the outer object has no `properties` map
+- OpenAI `function.parameters`
+- Anthropic `input_schema`
+- MCP `inputSchema`
+
+`if`, `then`, `not`, and `oneOf` still apply on a `parameters` object, and inside an extracted tool schema. `{"a":"1"}` against an integer property `a` becomes `{"a": 1}`.
+
+A `type: function` object with no parameters object is unfixable. The message is `unrecognized OpenAI tool definition`. Blank input against `{"type":"function","parameters":{"type":"object"}}` is `{}`. The type name `function` is only the tool wrapper.
+
+Any other object is still the schema itself. Blank input becomes `{}`, `[]`, or null, matching the schema type. A string, number, or boolean is not invented.
 
 ## Streaming preview
 
-`preview_args` reads an argument while tokens are still arriving. `[1, 2, 3` stays `Unfixable` from `repair_json`. The preview can show `[1, 2, 3]` with `complete: false`. That partial value must not be passed to a tool. `complete` is true only when the text is already one JSON value.
+`preview_args` reads an argument while tokens are still arriving. It does not repair the text. `repair_json("[1, 2, 3")` stays `Unfixable`. The preview can show `[1, 2, 3]` with `complete: false`. That partial value must not be passed to a tool. `complete` is true only when the text is already one JSON value.
+
+```rust
+use argmend::preview_args;
+
+fn main() {
+    let preview = preview_args("[1, 2, 3");
+    if let Some(value) = preview.value {
+        println!("complete={} value={value}", preview.complete);
+    }
+}
+```
 
 ## Already parsed JSON
 
@@ -80,17 +134,40 @@ That rename is refused, and the result is ambiguous, when:
 
 `RepairRequest::new` keeps path, alias, and truncation repairs on. `embedded_json`, `leading_prose`, and `wrap_scalar` stay off. Build `RepairOptions::new`, set one field, and pass it to `with_options`. Pass the same options to `repair_json_with`.
 
-`path_backslashes` set to `false` leaves a Windows path escape as that JSON escape. A bare key in the same text is still quoted. `aliases` set to `false` leaves `file` and an `x-aliases` name in place. `truncation` set to `false` leaves `{"file": "a.rs"` unfixable. A finished `{file: "a.rs"}` still repairs.
+```rust
+use argmend::{repair_json_with, RepairOptions};
 
-`embedded_json` stays off. Set it to `true` to parse one JSON string when the schema type is `object` or `array` and `string` is not also allowed. `{"a":"{\"b\":1}"}` against an object property `a` becomes `{"a":{"b":1}}`. The rewrite kind is `JsonString`, and the note is `parsed json object`. A string that is not JSON stays that string. `normalize` keeps this off.
+fn main() {
+    let mut options = RepairOptions::new();
+    options.leading_prose = true;
+    let outcome = repair_json_with(r#"Here is the call: {"a": 1}"#, options);
+    println!("{outcome:?}");
+}
+```
 
-`wrap_scalar` stays off. Set it to `true` to wrap one string, number, or bool when the schema type is `array` and not also `object`. `"a"` against an array of strings becomes `["a"]`. The item schema still applies, so `"1"` against an array of integers becomes `[1]`. A value that fails the item schema is ambiguous. An array that is already an array stays that array.
+| Field | Default | Effect when you change it |
+| --- | --- | --- |
+| `path_backslashes` | on | `false` leaves a Windows path escape as that JSON escape. A bare key in the same text is still quoted. |
+| `aliases` | on | `false` leaves `file` and an `x-aliases` name in place. |
+| `truncation` | on | `false` leaves `{"file": "a.rs"` unfixable. A finished `{file: "a.rs"}` still repairs. |
+| `embedded_json` | off | `true` parses one JSON string when the schema type is `object` or `array` and `string` is not also allowed. |
+| `leading_prose` | off | `true` extracts one object or array after a prefix, a word before a fence, or a `<tool_call>` tag. |
+| `wrap_scalar` | off | `true` wraps one string, number, or bool when the schema type is `array` and not also `object`. |
+
+`embedded_json` example: `{"a":"{\"b\":1}"}` against an object property `a` becomes `{"a":{"b":1}}`. The rewrite kind is `JsonString`, and the note is `parsed json object`. A string that is not JSON stays that string. `normalize` keeps this off.
+
+`wrap_scalar` example: `"a"` against an array of strings becomes `["a"]`. The item schema still applies, so `"1"` against an array of integers becomes `[1]`. A value that fails the item schema is ambiguous. An array that is already an array stays that array.
 
 ## What success does not mean
 
 `Ok` from `repair_args` means Argmend produced JSON. It does not mean the schema accepts that JSON. Validate the value before you run the tool.
 
-`$ref` and `$dynamicRef` are not resolved. `pattern`, `format`, and the content keywords are not evaluated. A value that already fails those stays in place when nothing else was rewritten.
+These keywords are left for the host:
+
+- `$ref` and `$dynamicRef` are not resolved
+- `pattern`, `format`, and the content keywords are not evaluated
+
+A value that already fails those stays in place when nothing else was rewritten.
 
 ## Contributing
 
