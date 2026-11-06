@@ -3715,6 +3715,17 @@ mod tests {
             RepairOutcome::Unfixable(_)
         ));
         assert!(matches!(
+            repair_tool_call_json("{a: 1 2 3}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{a:1, 2 3}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["2"], 3);
+            }
+            other => panic!("numeric key after a comma -> {other:?}"),
+        }
+        assert!(matches!(
             repair_tool_call_json(r#"{tel: +1 555 1234}"#),
             RepairOutcome::Unfixable(_)
         ));
