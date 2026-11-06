@@ -72,6 +72,12 @@ That rename is refused, and the result is ambiguous, when:
 
 `x-aliases` adds names for one property. A `content` property with `"x-aliases": ["text"]` turns `{"text": "hi"}` into `{"content": "hi"}`. The note is `renamed text to content`. The same three refusals apply. The alias and the real key with different values are also ambiguous.
 
+## Turning a repair off
+
+`RepairRequest::new` keeps every repair on. Build `RepairOptions::new`, set one field to `false`, and pass it to `with_options`.
+
+`path_backslashes` set to `false` leaves a Windows path escape as that JSON escape. A bare key in the same text is still quoted. `aliases` set to `false` leaves `file` and an `x-aliases` name in place. `truncation` set to `false` leaves `{"file": "a.rs"` unfixable. A finished `{file: "a.rs"}` still repairs.
+
 ## What success does not mean
 
 `Ok` from `repair_args` means Argmend produced JSON. It does not mean the schema accepts that JSON. Validate the value before you run the tool.
