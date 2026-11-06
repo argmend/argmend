@@ -31,8 +31,10 @@ pub(crate) const NORMALIZE_DEPTH_LIMIT: usize = 128;
 /// `$dynamicRef` are not resolved. They do not veto a sibling `type`, and
 /// they do not hide a sibling bound such as `maximum`.
 ///
-/// When this object has no `properties` map, a `parameters` object is the
-/// schema. `if` / `then`, `not`, and `oneOf` on that inner object still apply.
+/// A `parameters` object is the schema when this object is a tool wrapper,
+/// not a JSON Schema. A schema `type`, `properties`, or another schema
+/// keyword keeps this object. `name` and `description` do not. `if` /
+/// `then`, `not`, and `oneOf` on that inner object still apply.
 /// An `if` schema that does not match does not apply `then`. `allOf`,
 /// `oneOf`, `anyOf`, and a nested `if` inside that condition count.
 /// `else` runs, or the value stays.
@@ -74,9 +76,8 @@ fn normalize_child(
     schema: &Value,
     options: RepairOptions,
 ) -> Result<(Value, Vec<Rewrite>), RepairError> {
-    // A tool object with no `properties` map stores the schema under
-    // `parameters`. Keyword checks have to see that inner object, or
-    // `if` / `then`, `not`, and `oneOf` are skipped while fields still coerce.
+    // A tool wrapper stores the schema under `parameters`. A node that
+    // already has a schema keyword is the schema, so that key is left alone.
     let schema = schema_view(schema);
     let (next, rewrites) = normalize_known(value, schema, options)?;
     if next != *value || !rewrites.is_empty() {
@@ -359,11 +360,7 @@ fn apply_dependent_schemas(
 }
 
 fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
-    let schema = if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
-        schema
-    };
+    let schema = schema_view(schema);
     let mut out = Vec::new();
     for keyword in ["dependentSchemas", "dependencies"] {
         let Some(map) = schema.get(keyword).and_then(Value::as_object) else {
@@ -1719,11 +1716,7 @@ fn violates_property_names(schema: &Value, value: &Value) -> bool {
 /// failed keeps the outside-schema sentence.
 fn property_names_refusal(schema: &Value, value: &Value) -> Option<String> {
     let obj = value.as_object()?;
-    let schema = if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
-        schema
-    };
+    let schema = schema_view(schema);
     let names = schema
         .get("propertyNames")
         .filter(|schema| schema.is_object())?;
@@ -1782,11 +1775,7 @@ fn violates_dependent(schema: &Value, value: &Value) -> bool {
     let Some(obj) = value.as_object() else {
         return false;
     };
-    let schema = if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
-        schema
-    };
+    let schema = schema_view(schema);
     dependent_names_missing(schema, "dependentRequired", obj)
         || dependent_names_missing(schema, "dependencies", obj)
 }
@@ -2343,31 +2332,18 @@ fn property_lists_alias(prop: &Value, key: &str) -> bool {
 }
 
 fn object_properties(schema: &Value) -> Option<&Map<String, Value>> {
-    let schema = if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
-        schema
-    };
-    schema.get("properties")?.as_object()
+    schema_view(schema).get("properties")?.as_object()
 }
 
 fn has_pattern_properties(schema: &Value) -> bool {
-    fn nonempty(value: &Value) -> bool {
-        value
-            .get("patternProperties")
-            .and_then(Value::as_object)
-            .is_some_and(|patterns| !patterns.is_empty())
-    }
-    nonempty(schema) || schema.get("parameters").is_some_and(nonempty)
+    schema_view(schema)
+        .get("patternProperties")
+        .and_then(Value::as_object)
+        .is_some_and(|patterns| !patterns.is_empty())
 }
 
 fn additional_properties_schema(schema: &Value) -> Option<&Value> {
-    let schema = if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
-        schema
-    };
-    schema
+    schema_view(schema)
         .get("additionalProperties")
         .filter(|value| value.is_object())
 }
@@ -2485,11 +2461,64 @@ pub(crate) fn resolve_schema(schema: &Value) -> Result<&Value, RepairError> {
 }
 
 fn schema_view(schema: &Value) -> &Value {
-    if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
+    if is_json_schema(schema) {
         schema
+    } else {
+        schema.get("parameters").unwrap_or(schema)
     }
+}
+
+fn is_json_schema(schema: &Value) -> bool {
+    looks_like_json_schema(schema) || has_schema_keyword(schema)
+}
+
+/// Keywords that make this object the schema. `name` and `description`
+/// are absent, so a tool wrapper still unwraps `parameters`.
+fn has_schema_keyword(schema: &Value) -> bool {
+    let Some(map) = schema.as_object() else {
+        return false;
+    };
+    const KEYWORDS: &[&str] = &[
+        "enum",
+        "const",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "if",
+        "then",
+        "else",
+        "not",
+        "$ref",
+        "$dynamicRef",
+        "propertyNames",
+        "patternProperties",
+        "additionalProperties",
+        "unevaluatedProperties",
+        "dependentSchemas",
+        "dependencies",
+        "dependentRequired",
+        "required",
+        "items",
+        "prefixItems",
+        "contains",
+        "unevaluatedItems",
+        "additionalItems",
+        "pattern",
+        "format",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "minProperties",
+        "maxProperties",
+        "uniqueItems",
+    ];
+    KEYWORDS.iter().any(|key| map.contains_key(*key))
 }
 
 fn unevaluated_properties_closed(schema: &Value) -> bool {
@@ -2766,11 +2795,7 @@ fn refuse_covered_unknown(
 
 fn required_holds(schema: &Value, value: &Value) -> bool {
     let Some(obj) = value.as_object() else {
-        let schema = if schema.get("properties").is_none() {
-            schema.get("parameters").unwrap_or(schema)
-        } else {
-            schema
-        };
+        let schema = schema_view(schema);
         return schema
             .get("required")
             .and_then(Value::as_array)
@@ -2784,11 +2809,7 @@ fn required_present(schema: &Value, out: &Map<String, Value>) -> bool {
 }
 
 fn first_missing_required<'a>(schema: &'a Value, out: &Map<String, Value>) -> Option<&'a str> {
-    let schema = if schema.get("properties").is_none() {
-        schema.get("parameters").unwrap_or(schema)
-    } else {
-        schema
-    };
+    let schema = schema_view(schema);
     let required = schema.get("required").and_then(Value::as_array)?;
     required
         .iter()
