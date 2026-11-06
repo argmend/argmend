@@ -2436,7 +2436,7 @@ pub fn tool_schema(definition: &Value) -> Result<Option<&Value>, RepairError> {
     // A JSON Schema that happens to contain one of these keys stays the
     // schema. `type: function` is not a JSON Schema type, so an OpenAI
     // tool still extracts.
-    if looks_like_json_schema(definition) {
+    if is_json_schema(definition) {
         return Ok(None);
     }
     if let Some(function) = map.get("function")
@@ -2501,6 +2501,8 @@ fn is_json_schema(schema: &Value) -> bool {
 
 /// Keywords that make this object the schema. `name` and `description`
 /// are absent, so a tool wrapper still unwraps `parameters`.
+/// `$schema`, `$id`, `$defs`, and `definitions` are included because a
+/// schema document often has no `type` yet.
 fn has_schema_keyword(schema: &Value) -> bool {
     let Some(map) = schema.as_object() else {
         return false;
@@ -2515,6 +2517,14 @@ fn has_schema_keyword(schema: &Value) -> bool {
         "then",
         "else",
         "not",
+        "$schema",
+        "$id",
+        "$defs",
+        "definitions",
+        "$anchor",
+        "$dynamicAnchor",
+        "$vocabulary",
+        "$comment",
         "$ref",
         "$dynamicRef",
         "propertyNames",

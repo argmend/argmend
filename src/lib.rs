@@ -2393,6 +2393,20 @@ mod tests {
         })
         .expect("typed array");
         assert_eq!(repaired.value, json!([]));
+
+        let documented = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {"item": {"type": "string"}},
+            "parameters": {"type": "array"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "count",
+            raw: "  ",
+            schema: Some(&documented),
+            options: RepairOptions::default(),
+        })
+        .expect("schema document stays an object");
+        assert_eq!(repaired.value, json!({}));
     }
 
     #[test]
@@ -6573,6 +6587,31 @@ mod tests {
         });
         let repaired = normalize(&json!({"n": "1"}), &described).expect("tool description");
         assert_eq!(repaired.value["n"], 1);
+
+        let documented = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {"item": {"type": "string"}},
+            "parameters": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("1"), &documented).expect("schema document");
+        assert_eq!(repaired.value, "1");
+        assert!(repaired.rewrites.is_empty());
+
+        let legacy = json!({
+            "definitions": {"item": {"type": "string"}},
+            "parameters": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("1"), &legacy).expect("draft definitions");
+        assert_eq!(repaired.value, "1");
+        assert!(repaired.rewrites.is_empty());
+
+        let identified = json!({
+            "$id": "https://example.com/schema",
+            "input_schema": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("1"), &identified).expect("id keeps the schema");
+        assert_eq!(repaired.value, "1");
+        assert!(repaired.rewrites.is_empty());
     }
 
     #[test]
