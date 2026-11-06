@@ -3362,6 +3362,11 @@ mod tests {
 
         one_path("{path: C:/Users/sebta/a.rs}", "path", "C:/Users/sebta/a.rs");
         one_path(
+            "{path: C:\\Users\\O\u{2019}Brien}",
+            "path",
+            "C:\\Users\\O\u{2019}Brien",
+        );
+        one_path(
             r"{path: C:\Users\sebta\a.rs}",
             "path",
             "C:\\Users\\sebta\\a.rs",
