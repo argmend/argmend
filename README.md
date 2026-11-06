@@ -15,7 +15,7 @@ Argmend repairs broken tool-call arguments into JSON.
 
 ```toml
 [dependencies]
-argmend = "0.2"
+argmend = "0.3"
 ```
 
 Rust 1.95 or newer. The crate has no command-line program. Call it from your host.
