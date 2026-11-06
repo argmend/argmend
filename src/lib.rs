@@ -436,17 +436,13 @@ fn schema_types(schema: &Value) -> Vec<&str> {
             .map(|items| items.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default()
     }
+    // A tool wrapper unwraps here. A schema that already has properties
+    // or a type does not, so a nested parameters key cannot change blank input.
+    let schema = schema::schema_view(schema);
     if let Some(type_value) = schema.get("type") {
-        let found = names(type_value);
-        if !found.is_empty() {
-            return found;
-        }
+        return names(type_value);
     }
-    schema
-        .get("parameters")
-        .and_then(|params| params.get("type"))
-        .map(names)
-        .unwrap_or_default()
+    Vec::new()
 }
 
 /// Blank tool arguments are an empty object or an empty array.
@@ -1065,6 +1061,12 @@ mod tests {
                 assert_eq!(value["file"], "a.rs");
             }
             other => panic!("expected Repaired, got {other:?}"),
+        }
+        match repair_json("<parameter name='L'été'>x</parameter>") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["L'été"], "x", "{value}");
+            }
+            other => panic!("unicode xml name -> {other:?}"),
         }
     }
 
@@ -2357,6 +2359,63 @@ mod tests {
     }
 
     #[test]
+    fn blank_input_ignores_parameters_on_a_schema() {
+        let with_properties = json!({
+            "properties": {"n": {"type": "integer"}},
+            "parameters": {"type": "array"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "count",
+            raw: "  ",
+            schema: Some(&with_properties),
+            options: RepairOptions::default(),
+        })
+        .expect("properties stay an object");
+        assert_eq!(repaired.value, json!({}));
+
+        let wrapper = json!({
+            "name": "t",
+            "description": "read",
+            "parameters": {"type": "object"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "t",
+            raw: "  ",
+            schema: Some(&wrapper),
+            options: RepairOptions::default(),
+        })
+        .expect("tool wrapper");
+        assert_eq!(repaired.value, json!({}));
+
+        let typed_array = json!({
+            "type": "array",
+            "parameters": {"type": "object"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "list",
+            raw: "  ",
+            schema: Some(&typed_array),
+            options: RepairOptions::default(),
+        })
+        .expect("typed array");
+        assert_eq!(repaired.value, json!([]));
+
+        let documented = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {"item": {"type": "string"}},
+            "parameters": {"type": "array"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "count",
+            raw: "  ",
+            schema: Some(&documented),
+            options: RepairOptions::default(),
+        })
+        .expect("schema document stays an object");
+        assert_eq!(repaired.value, json!({}));
+    }
+
+    #[test]
     fn garbage_stays_unfixable() {
         assert!(matches!(
             repair_json("this is not json at all }{[]"),
@@ -2540,6 +2599,73 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn escaped_apostrophe_in_a_double_quoted_string_is_an_apostrophe() {
+        match repair_json(r#"{"msg":"it\'s fine"}"#) {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["msg"], "it's fine");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("apostrophe")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("double quoted apostrophe -> {other:?}"),
+        }
+        match repair_json(r#"{"name":"O\'Brien"}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["name"], "O'Brien"),
+            other => panic!("name -> {other:?}"),
+        }
+        match repair_json("{\"name\":\"O\\\u{2019}Brien\"}") {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["name"], "O\u{2019}Brien", "{value}");
+            }
+            other => panic!("curly name -> {other:?}"),
+        }
+        match repair_json("{\"path\":\"C:\\Users\\Ren\\\u{2019}\u{00e9}\"}") {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\Ren\u{2019}\u{00e9}", "{value}");
+            }
+            other => panic!("curly path -> {other:?}"),
+        }
+        match repair_json(r#"{"path":"C:\Users\O\'Brien"}"#) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\O'Brien", "{value}");
+            }
+            other => panic!("path name -> {other:?}"),
+        }
+        match repair_json(r#"{"path":"C:\Users\Ren\'é"}"#) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\Ren\u{0027}\u{00e9}", "{value}");
+            }
+            other => panic!("unicode name -> {other:?}"),
+        }
+        match repair_json(r#"{"path":"C:\Users\'"}"#) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["path"], "C:\\Users\\'", "{value}");
+            }
+            other => panic!("path end -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_space_run_after_a_nested_closer_repairs() {
+        let mut raw = String::from(r#"{"a":[1]"#);
+        raw.extend(std::iter::repeat_n(' ', 20_000));
+        raw.push_str(r#","b":2 "#);
+        let started = std::time::Instant::now();
+        match repair_json(&raw) {
+            RepairOutcome::Repaired { value, .. } | RepairOutcome::Valid(value) => {
+                assert_eq!(value["a"][0], 1);
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("{other:?}"),
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_millis() < 200, "space run took {elapsed:?}");
     }
 
     #[test]
@@ -3235,6 +3361,11 @@ mod tests {
         }
 
         one_path("{path: C:/Users/sebta/a.rs}", "path", "C:/Users/sebta/a.rs");
+        one_path(
+            "{path: C:\\Users\\O\u{2019}Brien}",
+            "path",
+            "C:\\Users\\O\u{2019}Brien",
+        );
         one_path(
             r"{path: C:\Users\sebta\a.rs}",
             "path",
@@ -6534,6 +6665,31 @@ mod tests {
         });
         let repaired = normalize(&json!({"n": "1"}), &described).expect("tool description");
         assert_eq!(repaired.value["n"], 1);
+
+        let documented = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {"item": {"type": "string"}},
+            "parameters": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("1"), &documented).expect("schema document");
+        assert_eq!(repaired.value, "1");
+        assert!(repaired.rewrites.is_empty());
+
+        let legacy = json!({
+            "definitions": {"item": {"type": "string"}},
+            "parameters": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("1"), &legacy).expect("draft definitions");
+        assert_eq!(repaired.value, "1");
+        assert!(repaired.rewrites.is_empty());
+
+        let identified = json!({
+            "$id": "https://example.com/schema",
+            "input_schema": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("1"), &identified).expect("id keeps the schema");
+        assert_eq!(repaired.value, "1");
+        assert!(repaired.rewrites.is_empty());
     }
 
     #[test]

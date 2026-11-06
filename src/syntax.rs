@@ -502,7 +502,7 @@ fn single_quote_is_mid_phrase(chars: &[char], open: usize) -> bool {
         if chars[index] == '\'' {
             let inside = chars
                 .get(index + 1)
-                .is_some_and(|next| next.is_ascii_alphanumeric());
+                .is_some_and(|next| next.is_alphanumeric());
             if inside {
                 index += 1;
                 continue;
@@ -595,9 +595,7 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                         continue;
                     }
                     if chars[i] == '\'' {
-                        let inside = chars
-                            .get(i + 1)
-                            .is_some_and(|next| next.is_ascii_alphanumeric());
+                        let inside = chars.get(i + 1).is_some_and(|next| next.is_alphanumeric());
                         if inside {
                             out.push('\'');
                             i += 1;
@@ -839,9 +837,18 @@ pub(crate) fn insert_missing_colons(s: &str) -> Result<String, RepairError> {
         if number_at(&chars, index) {
             let start = index;
             let keyish = colon_keyish(&stack);
+            // After a finished value, `1 2 3` is not a key `2`. A number
+            // is a key only while a key is expected, as in `{123 1}`.
+            let after_value = matches!(
+                stack.last(),
+                Some(ColonNest::Object {
+                    mode: ColonMode::After,
+                    ..
+                })
+            );
             index = copy_number(&chars, index, &mut out);
             let token: String = chars[start..index].iter().collect();
-            if keyish && plain_integer_key(&token) && colon_needed(&chars, index) {
+            if keyish && !after_value && plain_integer_key(&token) && colon_needed(&chars, index) {
                 out.push(':');
                 set_colon_mode(&mut stack, ColonMode::Value);
             } else {
@@ -1269,7 +1276,10 @@ pub(crate) struct BackslashPass {
 /// `C:\temp` is the six characters `C:\temp`, including when that path
 /// sits inside a sentence. `\n` in a string that is not on a drive path
 /// stays a newline. A `\\` pair stays one backslash. An escape JSON does
-/// not recognize, such as `\U`, stays a backslash.
+/// not recognize, such as `\U`, stays a backslash. `\'` or a backslash
+/// before a curly apostrophe, before a letter, is that apostrophe,
+/// including in `O\'Brien` on a drive path. The backslash stays when
+/// that path ends on the mark.
 pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     if !raw.contains('\\') {
         return BackslashPass {
@@ -1282,6 +1292,7 @@ pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     let mut index = 0;
     let mut kept_path = false;
     let mut kept_invalid = false;
+    let mut dropped_apostrophe = false;
     while index < chars.len() {
         if chars[index] != '"' {
             out.push(chars[index]);
@@ -1295,7 +1306,10 @@ pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
             if rewritten.kept_path {
                 kept_path = true;
             }
-            if rewritten.kept_invalid || !rewritten.kept_path {
+            if rewritten.dropped_apostrophe {
+                dropped_apostrophe = true;
+            }
+            if rewritten.kept_invalid || (!rewritten.kept_path && !rewritten.dropped_apostrophe) {
                 kept_invalid = true;
             }
         }
@@ -1311,6 +1325,9 @@ pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     let mut repairs = Vec::new();
     if kept_path {
         repairs.push(syntax_note("kept windows path backslashes"));
+    }
+    if dropped_apostrophe {
+        repairs.push(syntax_note("dropped an escaped apostrophe"));
     }
     if kept_invalid {
         repairs.push(syntax_note("kept invalid escapes"));
@@ -1422,6 +1439,7 @@ struct StringBodyRewrite {
     text: String,
     kept_path: bool,
     kept_invalid: bool,
+    dropped_apostrophe: bool,
 }
 
 fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
@@ -1431,6 +1449,7 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
         return StringBodyRewrite {
             kept_path: text != original,
             kept_invalid: false,
+            dropped_apostrophe: false,
             text,
         };
     }
@@ -1444,6 +1463,7 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
     let mut index = 0;
     let mut kept_path = false;
     let mut kept_invalid = false;
+    let mut dropped_apostrophe = false;
     while index < body.len() {
         if body[index] != '\\' {
             out.push(body[index]);
@@ -1474,6 +1494,21 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
             index += 2;
             continue;
         }
+        // `\'` or a backslash before a curly apostrophe is the name, as
+        // in O'Brien. A path that ends on that mark still keeps the separator.
+        if let Some(mark) = body.get(index + 1).copied()
+            && is_word_apostrophe(mark)
+        {
+            let name_continues = body
+                .get(index + 2)
+                .is_some_and(|ch| ch.is_alphanumeric() || *ch == '_');
+            if !in_path || name_continues {
+                out.push(mark);
+                dropped_apostrophe = true;
+                index += 2;
+                continue;
+            }
+        }
         out.push('\\');
         out.push('\\');
         if in_path {
@@ -1487,6 +1522,7 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
         text: out,
         kept_path,
         kept_invalid,
+        dropped_apostrophe,
     }
 }
 
@@ -1645,6 +1681,7 @@ fn is_quoted_path_char(ch: char) -> bool {
                 | '#'
                 | '%'
                 | '\''
+                | '\u{2019}'
                 | ','
                 | ';'
                 | '!'
@@ -1666,19 +1703,29 @@ pub(crate) fn quote_unquoted_paths(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() + 8);
     let mut index = 0;
+    // The previous non-space token. Walking back over a long space run
+    // on every character made a padded tool call quadratic.
+    let mut prev_sig: Option<char> = None;
     while index < chars.len() {
         if chars[index] == '"' {
-            index = copy_quoted(&chars, index, &mut out);
+            let next = copy_quoted(&chars, index, &mut out);
+            prev_sig = sig_before(&chars, next);
+            index = next;
             continue;
         }
-        if path_value_position(&chars, index)
+        if matches!(prev_sig, Some(':' | '[' | ',' | '='))
             && let Some(end) = unquoted_path_end(&chars, index)
         {
             push_json_string(&mut out, &chars[index..end]);
+            prev_sig = sig_before(&chars, end);
             index = end;
             continue;
         }
-        out.push(chars[index]);
+        let ch = chars[index];
+        out.push(ch);
+        if !ch.is_ascii_whitespace() {
+            prev_sig = Some(ch);
+        }
         index += 1;
     }
     out
@@ -1812,6 +1859,7 @@ fn is_unquoted_path_char(ch: char) -> bool {
                 | '#'
                 | '%'
                 | '\''
+                | '\u{2019}'
                 | '!'
                 | '?'
                 | '*'
@@ -1824,14 +1872,18 @@ fn is_url_char(ch: char) -> bool {
 }
 
 fn path_value_position(chars: &[char], index: usize) -> bool {
+    matches!(sig_before(chars, index), Some(':' | '[' | ',' | '='))
+}
+
+fn sig_before(chars: &[char], index: usize) -> Option<char> {
     let mut prev = index;
     while prev > 0 {
         prev -= 1;
         if !chars[prev].is_ascii_whitespace() {
-            return matches!(chars[prev], ':' | '[' | ',' | '=');
+            return Some(chars[prev]);
         }
     }
-    false
+    None
 }
 
 fn push_json_string(out: &mut String, chars: &[char]) {
@@ -2885,7 +2937,7 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 /// Strip `//` and `#` line comments and `/* ... */` block comments.
 ///
 /// Double-quoted strings are copied until the next unescaped `"`.
-/// Inside a single-quoted string, a `'` followed by an ASCII letter or
+/// Inside a single-quoted string, a `'` followed by a letter or
 /// digit stays in the value. Any other `'` closes the string, and an
 /// unclosed string does not gain a closer. Quote repair runs after this
 /// stage, so `//` inside `'http://example.com'` is part of the value.
@@ -2940,9 +2992,7 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                             i += 1;
                         }
                     } else if chars[i] == '\'' {
-                        let inside = chars
-                            .get(i + 1)
-                            .is_some_and(|next| next.is_ascii_alphanumeric());
+                        let inside = chars.get(i + 1).is_some_and(|next| next.is_alphanumeric());
                         if inside {
                             out.push('\'');
                             i += 1;
@@ -3594,6 +3644,12 @@ mod tests {
             repair_tool_call_json("{a: hello world}"),
             RepairOutcome::Unfixable(_)
         ));
+        match repair_tool_call_json("{season: 'L'été'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["season"], "L'été", "{value}");
+            }
+            other => panic!("single quoted unicode name -> {other:?}"),
+        }
         assert!(matches!(
             repair_tool_call_json("[hello world]"),
             RepairOutcome::Unfixable(_)
@@ -3660,6 +3716,35 @@ mod tests {
         }
         assert!(matches!(
             repair_tool_call_json(r#"{"a":1 2}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json(r#"{"a":1 2 3}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_tool_call_json("{a: 1 2 3}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{a:1, 2 3}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], 1);
+                assert_eq!(value["2"], 3);
+            }
+            other => panic!("numeric key after a comma -> {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json("{a:{b:1 2 3}}"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_tool_call_json("{a:[1 2 3]}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], serde_json::json!([1, 2, 3]));
+            }
+            other => panic!("array commas -> {other:?}"),
+        }
+        assert!(matches!(
+            repair_tool_call_json(r#"{tel: +1 555 1234}"#),
             RepairOutcome::Unfixable(_)
         ));
         assert!(matches!(

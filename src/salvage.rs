@@ -99,6 +99,15 @@ fn suffix_is_only_prose(tail: &str) -> bool {
     )
 }
 
+fn suffix_is_only_prose_at(chars: &[char], index: usize) -> bool {
+    let mut start = index;
+    while start < chars.len() && chars[start].is_whitespace() {
+        start += 1;
+    }
+    let rest: String = chars[start..].iter().collect();
+    suffix_is_only_prose(&rest)
+}
+
 /// Drop a fence info string such as `json`, `jsonc`, or `json5` when it is a tag.
 ///
 /// The tag may contain a digit. A space or tab before the tag is ignored,
@@ -159,12 +168,25 @@ pub(crate) fn close_truncated(raw: &str) -> Option<Truncation> {
     let mut last_sig = None;
     let mut inserted = false;
     let mut dropped_prose = false;
+    // A space run after `]` does not change the prose decision. Rebuilding
+    // the suffix on every space made a padded tool call quadratic.
+    let mut prose_clear_until = 0usize;
     for (idx, &ch) in chars.iter().enumerate() {
-        if !in_string && !stack.is_empty() && matches!(last_sig, Some('}') | Some(']')) {
-            let rest: String = chars[idx..].iter().collect();
-            if suffix_is_only_prose(&rest) {
+        if idx >= prose_clear_until
+            && !in_string
+            && !stack.is_empty()
+            && matches!(last_sig, Some('}') | Some(']'))
+        {
+            if suffix_is_only_prose_at(&chars, idx) {
                 dropped_prose = true;
                 break;
+            }
+            if ch.is_whitespace() {
+                let mut next = idx + 1;
+                while next < chars.len() && chars[next].is_whitespace() {
+                    next += 1;
+                }
+                prose_clear_until = next;
             }
         }
         if in_string {
@@ -373,9 +395,9 @@ fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
         .filter(|ch| *ch == '"' || *ch == '\'')
         .ok_or_else(|| RepairError::Unfixable("xml parameter name is not quoted".into()))?;
     let rest = &rest[1..];
-    // A `'` before an ASCII letter or digit stays in the name (`O'Reilly`).
+    // A `'` before a letter or digit stays in the name (`O'Reilly`, `L'été`).
     // Any other `'`, including `>`, whitespace, or end, closes it. `"` still
-    // closes at the first quote. A non-ASCII letter does not keep the quote open.
+    // closes at the first quote.
     let end = if quote == '\'' {
         rest.char_indices().find_map(|(index, ch)| {
             if ch != '\'' {
@@ -384,7 +406,7 @@ fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
             let inside = rest[index + 1..]
                 .chars()
                 .next()
-                .is_some_and(|next| next.is_ascii_alphanumeric());
+                .is_some_and(|next| next.is_alphanumeric());
             if inside { None } else { Some(index) }
         })
     } else {
