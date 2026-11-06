@@ -1062,6 +1062,12 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+        match repair_json("<parameter name='L'été'>x</parameter>") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["L'été"], "x", "{value}");
+            }
+            other => panic!("unicode xml name -> {other:?}"),
+        }
     }
 
     #[test]

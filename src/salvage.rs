@@ -395,9 +395,9 @@ fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
         .filter(|ch| *ch == '"' || *ch == '\'')
         .ok_or_else(|| RepairError::Unfixable("xml parameter name is not quoted".into()))?;
     let rest = &rest[1..];
-    // A `'` before an ASCII letter or digit stays in the name (`O'Reilly`).
+    // A `'` before a letter or digit stays in the name (`O'Reilly`, `L'été`).
     // Any other `'`, including `>`, whitespace, or end, closes it. `"` still
-    // closes at the first quote. A non-ASCII letter does not keep the quote open.
+    // closes at the first quote.
     let end = if quote == '\'' {
         rest.char_indices().find_map(|(index, ch)| {
             if ch != '\'' {
@@ -406,7 +406,7 @@ fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
             let inside = rest[index + 1..]
                 .chars()
                 .next()
-                .is_some_and(|next| next.is_ascii_alphanumeric());
+                .is_some_and(|next| next.is_alphanumeric());
             if inside { None } else { Some(index) }
         })
     } else {

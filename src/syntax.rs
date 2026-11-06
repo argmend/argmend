@@ -502,7 +502,7 @@ fn single_quote_is_mid_phrase(chars: &[char], open: usize) -> bool {
         if chars[index] == '\'' {
             let inside = chars
                 .get(index + 1)
-                .is_some_and(|next| next.is_ascii_alphanumeric());
+                .is_some_and(|next| next.is_alphanumeric());
             if inside {
                 index += 1;
                 continue;
@@ -595,9 +595,7 @@ pub(crate) fn fix_single_quotes(s: &str) -> String {
                         continue;
                     }
                     if chars[i] == '\'' {
-                        let inside = chars
-                            .get(i + 1)
-                            .is_some_and(|next| next.is_ascii_alphanumeric());
+                        let inside = chars.get(i + 1).is_some_and(|next| next.is_alphanumeric());
                         if inside {
                             out.push('\'');
                             i += 1;
@@ -2937,7 +2935,7 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 /// Strip `//` and `#` line comments and `/* ... */` block comments.
 ///
 /// Double-quoted strings are copied until the next unescaped `"`.
-/// Inside a single-quoted string, a `'` followed by an ASCII letter or
+/// Inside a single-quoted string, a `'` followed by a letter or
 /// digit stays in the value. Any other `'` closes the string, and an
 /// unclosed string does not gain a closer. Quote repair runs after this
 /// stage, so `//` inside `'http://example.com'` is part of the value.
@@ -2992,9 +2990,7 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                             i += 1;
                         }
                     } else if chars[i] == '\'' {
-                        let inside = chars
-                            .get(i + 1)
-                            .is_some_and(|next| next.is_ascii_alphanumeric());
+                        let inside = chars.get(i + 1).is_some_and(|next| next.is_alphanumeric());
                         if inside {
                             out.push('\'');
                             i += 1;
@@ -3646,6 +3642,12 @@ mod tests {
             repair_tool_call_json("{a: hello world}"),
             RepairOutcome::Unfixable(_)
         ));
+        match repair_tool_call_json("{season: 'L'été'}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["season"], "L'été", "{value}");
+            }
+            other => panic!("single quoted unicode name -> {other:?}"),
+        }
         assert!(matches!(
             repair_tool_call_json("[hello world]"),
             RepairOutcome::Unfixable(_)
