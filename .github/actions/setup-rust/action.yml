@@ -8,6 +8,9 @@ inputs:
   components:
     description: Comma-separated rustup components.
     default: ""
+  workspace:
+    description: Cargo workspace for rust-cache, relative to the runner workspace.
+    default: "."
 
 runs:
   using: composite
@@ -18,4 +21,5 @@ runs:
         components: ${{ inputs.components }}
     - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       with:
+        workspaces: ${{ inputs.workspace }}
         save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group' }}

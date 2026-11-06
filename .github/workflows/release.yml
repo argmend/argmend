@@ -76,6 +76,8 @@ jobs:
           ref: ${{ env.TAG }}
           path: crate
       - uses: ./publisher/.github/actions/setup-rust
+        with:
+          workspace: crate
       - name: Package, SBOM, and provenance
         working-directory: crate
         run: |
@@ -124,6 +126,18 @@ jobs:
             "$GITHUB_WORKSPACE"/attestation-bundles/*.intoto.jsonl \
             --repo "${{ github.repository }}" \
             --clobber
+      # Curated notes live on release-note-<semver> or in Actions vars.
+      # After a successful apply the notes branch is deleted. Missing
+      # source leaves the auto changelog. continue-on-error so a notes
+      # miss does not fail the crate publish.
+      - name: Apply curated release notes
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_NOTES: ${{ vars.RELEASE_NOTES }}
+          RELEASE_NOTES_TAG: ${{ vars.RELEASE_NOTES_TAG }}
+        run: bash publisher/scripts/apply-release-notes.sh
       - name: Publish the crate
         env:
           GH_TOKEN: ${{ github.token }}

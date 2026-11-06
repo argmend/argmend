@@ -43,6 +43,8 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           path: crate
       - uses: ./publisher/.github/actions/setup-rust
+        with:
+          workspace: crate
       - id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - name: Publish to crates.io
