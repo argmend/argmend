@@ -10,6 +10,12 @@ Claim: an ambiguous repair is not guessed.
 
 Evidence: `RepairOutcome::Ambiguous` is returned when more than one repair is possible. Tests cover that result.
 
+Claim: `normalize` and `repair_args` do not abort on a deeply nested value.
+
+`normalize` walks the value on the heap and refuses more than 128 nested arrays or objects. The error is `value is nested too deeply`. `repair_args` calls `normalize`, so it shares that limit. A string still goes through `serde_json`, which stops at its own recursion limit before a `Value` exists. The `repair_json` claim above is only about parsing text.
+
+Evidence: `normalize_stops_past_the_depth_limit`.
+
 Claim: `Ok` from `repair_args` is JSON, not schema acceptance.
 
 Evidence: the README and `repair_args` documentation say the host still validates. `$ref`, `pattern`, and `format` are not evaluated. Tests cover those refusals.
