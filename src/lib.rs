@@ -82,8 +82,12 @@ pub enum RepairError {
 /// A Windows path keeps its backslashes, including one inside a sentence.
 /// A JSON escape after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays that escape.
 /// An unquoted drive path is one string.
-/// A sentence after one object or array is removed. A second JSON value stays
-/// unfixable. An extra `}` or `]` stays unfixable. A missing inner closer is
+/// A sentence after one object or array is removed, as in `{"a": 1}`
+/// followed by `Done.`. The same sentence before the value, as in
+/// `Here is the call: {"a": 1}`, stays unfixable. A markdown fence that
+/// starts the input is unwrapped. A word before that fence stays unfixable.
+/// A `<tool_call>` tag around the value stays unfixable. A second JSON value
+/// stays unfixable. An extra `}` or `]` stays unfixable. A missing inner closer is
 /// inserted when the outer closer is present. A number that is the last
 /// character stays unfixable. Whitespace after that number closes the container.
 pub fn repair_json(raw: &str) -> RepairOutcome {
@@ -411,6 +415,34 @@ mod tests {
             repair_json("```json\n{\"a\": 1}\n```\n{\"b\": 2}"),
             RepairOutcome::Unfixable(_)
         ));
+    }
+
+    #[test]
+    fn leading_prose_and_tool_call_tags_stay_unfixable() {
+        assert!(matches!(
+            repair_json(r#"Here is the call: {"a": 1}"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("Sure:\n```json\n{\"a\": 1}\n```"),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json("<tool_call>{\"a\":1}</tool_call>"),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_json("{\"a\": 1}\nDone.") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["a"], 1);
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("trailing prose")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("trailing Done. -> {other:?}"),
+        }
     }
 
     #[test]
