@@ -239,11 +239,20 @@ pub struct ArgumentPreview {
 /// [`RepairOutcome::Unfixable`] for `[1, 2, 3`. The preview may show
 /// `[1, 2, 3]` with `complete: false`. That partial value must not be
 /// passed to a tool. An unclosed string has no value and does not panic.
+/// JSON whitespace still counts as complete. A no-break space around
+/// the value does not.
 pub fn preview_args(raw: &str) -> ArgumentPreview {
-    if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
         return ArgumentPreview {
             value: Some(value),
             complete: true,
+        };
+    }
+    // `trim` also drops U+00A0. That text is not JSON yet.
+    if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+        return ArgumentPreview {
+            value: Some(value),
+            complete: false,
         };
     }
     let padded = format!("{}\n", raw.trim_end());
@@ -677,6 +686,14 @@ mod tests {
         let open_string = preview_args("\"hello");
         assert!(!open_string.complete);
         assert!(open_string.value.is_none());
+
+        let spaced = preview_args("\n[1, 2, 3]\n");
+        assert!(spaced.complete);
+        assert_eq!(spaced.value, Some(json!([1, 2, 3])));
+
+        let nbsp = preview_args("\u{00a0}{\"a\":1}");
+        assert!(!nbsp.complete, "{nbsp:?}");
+        assert_eq!(nbsp.value, Some(json!({"a": 1})));
     }
 
     #[test]
