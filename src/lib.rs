@@ -217,6 +217,48 @@ pub fn repair_json_with(raw: &str, options: RepairOptions) -> RepairOutcome {
     }
 }
 
+/// A look at a tool-call argument that may still be streaming.
+///
+/// `complete` is true only when `raw` is already one JSON value.
+/// A preview with `complete: false` must not be passed to a tool.
+/// [`repair_json`] is unchanged and still refuses an unclosed value.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ArgumentPreview {
+    /// JSON read from the text. Absent when no value could be read.
+    pub value: Option<Value>,
+    /// True only when the text is already one complete JSON value.
+    pub complete: bool,
+}
+
+/// Preview a tool-call argument while tokens are still arriving.
+///
+/// This does not repair the text. [`repair_json`] still returns
+/// [`RepairOutcome::Unfixable`] for `[1, 2, 3`. The preview may show
+/// `[1, 2, 3]` with `complete: false`. That partial value must not be
+/// passed to a tool. An unclosed string has no value and does not panic.
+pub fn preview_args(raw: &str) -> ArgumentPreview {
+    if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+        return ArgumentPreview {
+            value: Some(value),
+            complete: true,
+        };
+    }
+    let padded = format!("{}\n", raw.trim_end());
+    if let Some(closed) = salvage::close_truncated(&padded)
+        && let Ok(value) = serde_json::from_str::<Value>(closed.text.trim())
+    {
+        return ArgumentPreview {
+            value: Some(value),
+            complete: false,
+        };
+    }
+    ArgumentPreview {
+        value: None,
+        complete: false,
+    }
+}
+
 fn salvage_value(raw: &str, options: RepairOptions) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let (raw, mut prefix) = match without_edge_unicode_whitespace(raw) {
         Some(rest) => (
@@ -620,6 +662,23 @@ mod tests {
             }
             other => panic!("trailing Done. -> {other:?}"),
         }
+    }
+
+    #[test]
+    fn preview_shows_an_unclosed_array_without_repairing_it() {
+        let raw = "[1, 2, 3";
+        assert!(matches!(repair_json(raw), RepairOutcome::Unfixable(_)));
+        let preview = preview_args(raw);
+        assert!(!preview.complete);
+        assert_eq!(preview.value, Some(json!([1, 2, 3])));
+
+        let done = preview_args("[1, 2, 3]");
+        assert!(done.complete);
+        assert_eq!(done.value, Some(json!([1, 2, 3])));
+
+        let open_string = preview_args("\"hello");
+        assert!(!open_string.complete);
+        assert!(open_string.value.is_none());
     }
 
     #[test]
