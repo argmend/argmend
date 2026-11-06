@@ -436,17 +436,13 @@ fn schema_types(schema: &Value) -> Vec<&str> {
             .map(|items| items.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default()
     }
+    // A tool wrapper unwraps here. A schema that already has properties
+    // or a type does not, so a nested parameters key cannot change blank input.
+    let schema = schema::schema_view(schema);
     if let Some(type_value) = schema.get("type") {
-        let found = names(type_value);
-        if !found.is_empty() {
-            return found;
-        }
+        return names(type_value);
     }
-    schema
-        .get("parameters")
-        .and_then(|params| params.get("type"))
-        .map(names)
-        .unwrap_or_default()
+    Vec::new()
 }
 
 /// Blank tool arguments are an empty object or an empty array.
@@ -2354,6 +2350,49 @@ mod tests {
                 "{raw:?} {repaired:?}"
             );
         }
+    }
+
+    #[test]
+    fn blank_input_ignores_parameters_on_a_schema() {
+        let with_properties = json!({
+            "properties": {"n": {"type": "integer"}},
+            "parameters": {"type": "array"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "count",
+            raw: "  ",
+            schema: Some(&with_properties),
+            options: RepairOptions::default(),
+        })
+        .expect("properties stay an object");
+        assert_eq!(repaired.value, json!({}));
+
+        let wrapper = json!({
+            "name": "t",
+            "description": "read",
+            "parameters": {"type": "object"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "t",
+            raw: "  ",
+            schema: Some(&wrapper),
+            options: RepairOptions::default(),
+        })
+        .expect("tool wrapper");
+        assert_eq!(repaired.value, json!({}));
+
+        let typed_array = json!({
+            "type": "array",
+            "parameters": {"type": "object"}
+        });
+        let repaired = repair_args(&RepairRequest {
+            tool_name: "list",
+            raw: "  ",
+            schema: Some(&typed_array),
+            options: RepairOptions::default(),
+        })
+        .expect("typed array");
+        assert_eq!(repaired.value, json!([]));
     }
 
     #[test]

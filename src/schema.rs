@@ -2487,7 +2487,7 @@ pub(crate) fn resolve_schema(schema: &Value) -> Result<&Value, RepairError> {
     Ok(tool_schema(schema)?.unwrap_or(schema))
 }
 
-fn schema_view(schema: &Value) -> &Value {
+pub(crate) fn schema_view(schema: &Value) -> &Value {
     if is_json_schema(schema) {
         schema
     } else {
