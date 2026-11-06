@@ -1278,9 +1278,10 @@ pub(crate) struct BackslashPass {
 /// `C:\temp` is the six characters `C:\temp`, including when that path
 /// sits inside a sentence. `\n` in a string that is not on a drive path
 /// stays a newline. A `\\` pair stays one backslash. An escape JSON does
-/// not recognize, such as `\U`, stays a backslash. `\'` before a letter
-/// is an apostrophe, including in `O\'Brien` on a drive path. The
-/// backslash stays when that path ends on `\'`.
+/// not recognize, such as `\U`, stays a backslash. `\'` or a backslash
+/// before a curly apostrophe, before a letter, is that apostrophe,
+/// including in `O\'Brien` on a drive path. The backslash stays when
+/// that path ends on the mark.
 pub(crate) fn pass_string_backslashes(raw: &str) -> BackslashPass {
     if !raw.contains('\\') {
         return BackslashPass {
@@ -1495,17 +1496,20 @@ fn rewrite_string_body(body: &[char]) -> StringBodyRewrite {
             index += 2;
             continue;
         }
-        // `\'` before a letter is the name, as in O'Brien. A path that
-        // ends on `\'` still keeps that separator.
-        let apostrophe_in_name = body.get(index + 1) == Some(&'\'')
-            && body
+        // `\'` or a backslash before a curly apostrophe is the name, as
+        // in O'Brien. A path that ends on that mark still keeps the separator.
+        if let Some(mark) = body.get(index + 1).copied()
+            && is_word_apostrophe(mark)
+        {
+            let name_continues = body
                 .get(index + 2)
                 .is_some_and(|ch| ch.is_alphanumeric() || *ch == '_');
-        if (!in_path && body.get(index + 1) == Some(&'\'')) || (in_path && apostrophe_in_name) {
-            out.push('\'');
-            dropped_apostrophe = true;
-            index += 2;
-            continue;
+            if !in_path || name_continues {
+                out.push(mark);
+                dropped_apostrophe = true;
+                index += 2;
+                continue;
+            }
         }
         out.push('\\');
         out.push('\\');
