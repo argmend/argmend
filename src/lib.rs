@@ -6,6 +6,8 @@
 //! Match [`RepairOutcome`], [`RewriteKind`], and [`RepairError`] with a
 //! wildcard arm. A later release can add a variant. Build [`RepairRequest`]
 //! with [`RepairRequest::new`] so a new field is not required.
+//! [`RepairRequest::with_options`] turns off path backslashes, alias
+//! renames, or truncation closing. The default keeps those repairs on.
 //!
 //! [`repair_args`] and [`normalize`] produce JSON. A successful result is
 //! not a promise that the schema accepts it. The host still validates
@@ -63,25 +65,68 @@ pub enum RewriteKind {
     Empty,
 }
 
+/// Which repairs [`repair_args`] may apply.
+///
+/// The default keeps every repair on. Set one field to `false` to turn
+/// that family off. The other repairs still run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RepairOptions {
+    /// Restore a Windows path backslash inside a string.
+    pub path_backslashes: bool,
+    /// Rename a path key or an `x-aliases` name.
+    pub aliases: bool,
+    /// Close a container that was cut off.
+    pub truncation: bool,
+}
+
+impl RepairOptions {
+    /// Every repair stays on.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for RepairOptions {
+    fn default() -> Self {
+        Self {
+            path_backslashes: true,
+            aliases: true,
+            truncation: true,
+        }
+    }
+}
+
 /// Arguments plus an optional JSON schema.
 ///
 /// Build this with [`RepairRequest::new`]. A later field is not required.
+/// [`RepairRequest::with_options`] turns one repair family off.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct RepairRequest<'a> {
     pub tool_name: &'a str,
     pub raw: &'a str,
     pub schema: Option<&'a Value>,
+    /// Repairs that stay on. [`RepairRequest::new`] uses [`RepairOptions::default`].
+    pub options: RepairOptions,
 }
 
 impl<'a> RepairRequest<'a> {
     /// One tool call. `schema` is `None` when the host has no schema.
+    /// Every repair stays on.
     pub fn new(tool_name: &'a str, raw: &'a str, schema: Option<&'a Value>) -> Self {
         Self {
             tool_name,
             raw,
             schema,
+            options: RepairOptions::default(),
         }
+    }
+
+    /// Replace the repair switches. Other fields stay as they are.
+    pub fn with_options(mut self, options: RepairOptions) -> Self {
+        self.options = options;
+        self
     }
 }
 
@@ -123,7 +168,7 @@ pub enum RepairError {
 /// inserted when the outer closer is present. A number that is the last
 /// character stays unfixable. Whitespace after that number closes the container.
 pub fn repair_json(raw: &str) -> RepairOutcome {
-    match salvage_value(raw) {
+    match salvage_value(raw, RepairOptions::default()) {
         Ok((value, repairs)) if repairs.is_empty() => RepairOutcome::Valid(value),
         Ok((value, repairs)) => RepairOutcome::Repaired { value, repairs },
         Err(RepairError::Unfixable(reason)) => RepairOutcome::Unfixable(reason),
@@ -131,7 +176,7 @@ pub fn repair_json(raw: &str) -> RepairOutcome {
     }
 }
 
-fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
+fn salvage_value(raw: &str, options: RepairOptions) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let (raw, mut prefix) = match without_edge_unicode_whitespace(raw) {
         Some(rest) => (
             rest,
@@ -148,7 +193,15 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
     };
     // `{"path":"C:\temp"}` is valid JSON and the value contains a tab.
     // Restore the path backslash before that parse counts as Valid.
-    let passed = syntax::pass_string_backslashes(raw);
+    // A host can leave that escape in place and still run the other passes.
+    let passed = if options.path_backslashes {
+        syntax::pass_string_backslashes(raw)
+    } else {
+        syntax::BackslashPass {
+            text: raw.to_string(),
+            repairs: Vec::new(),
+        }
+    };
     prefix.extend(passed.repairs);
     let current = passed.text;
     if let Ok(value) = serde_json::from_str(&current) {
@@ -166,7 +219,7 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
 
     // The backslash pass already ran. Stages, prose, and truncation stay on
     // this path so a leading BOM does not skip or repeat them.
-    let staged = syntax::apply_stages(&body)?;
+    let staged = syntax::apply_stages(&body, options.path_backslashes)?;
     let parse_error = match serde_json::from_str::<Value>(&staged.text) {
         Ok(value) => {
             prefix.extend(staged.repairs);
@@ -183,7 +236,9 @@ fn salvage_value(raw: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {
         return with_unique_keys(&trimmed, value, prefix);
     }
 
-    if let Some(closed) = salvage::close_truncated(&staged.text) {
+    if options.truncation
+        && let Some(closed) = salvage::close_truncated(&staged.text)
+    {
         if let Ok(value) = serde_json::from_str::<Value>(&closed.text) {
             prefix.extend(staged.repairs);
             prefix.push(note(RewriteKind::ClosedTruncation, "closed truncated json"));
@@ -337,6 +392,10 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 ///
 /// Blank input is `{}`, `[]`, or null, matching the schema type.
 ///
+/// [`RepairRequest::new`] keeps path backslashes, alias renames, and
+/// truncation closing on. [`RepairRequest::with_options`] turns one of
+/// those families off. The other repairs still run.
+///
 /// ```
 /// use argmend::{repair_args, RepairRequest};
 /// use serde_json::json;
@@ -366,20 +425,21 @@ pub fn repair_args(request: &RepairRequest<'_>) -> Result<Repaired, RepairError>
             }],
         };
         if let Some(schema) = request.schema {
-            let normalized =
-                normalize(&repaired.value, schema).map_err(|err| named(request.tool_name, err))?;
+            let normalized = schema::normalize_with(&repaired.value, schema, request.options)
+                .map_err(|err| named(request.tool_name, err))?;
             repaired.value = normalized.value;
             repaired.rewrites.extend(normalized.rewrites);
         }
         return Ok(repaired);
     }
 
-    let (value, mut rewrites) = match salvage_value(request.raw) {
+    let (value, mut rewrites) = match salvage_value(request.raw, request.options) {
         Ok(parsed) => parsed,
         Err(err) => return Err(named(request.tool_name, err)),
     };
     if let Some(schema) = request.schema {
-        let normalized = normalize(&value, schema).map_err(|err| named(request.tool_name, err))?;
+        let normalized = schema::normalize_with(&value, schema, request.options)
+            .map_err(|err| named(request.tool_name, err))?;
         rewrites.extend(normalized.rewrites);
         return Ok(Repaired {
             value: normalized.value,
@@ -413,6 +473,7 @@ mod tests {
             tool_name: "edit_file",
             raw,
             schema: None,
+            options: RepairOptions::default(),
         })
         .expect("unclosed fence");
         assert_eq!(repaired.value["file"], "a.rs");
@@ -617,6 +678,7 @@ mod tests {
             tool_name: "edit_file",
             raw,
             schema: None,
+            options: RepairOptions::default(),
         })
         .expect("jsonc");
         assert_eq!(repaired.value["file"], "a.rs");
@@ -811,6 +873,7 @@ mod tests {
             tool_name: "edit_file",
             raw: r#"<parameter name="force">true</parameter>"#,
             schema: Some(&schema),
+            options: RepairOptions::default(),
         })
         .expect("schema coerce");
         assert_eq!(repaired.value["force"], true);
@@ -863,6 +926,7 @@ mod tests {
             tool_name: "edit_file",
             raw,
             schema: None,
+            options: RepairOptions::default(),
         })
         .unwrap_err();
         assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
@@ -888,6 +952,7 @@ mod tests {
             tool_name: "edit_file",
             raw: r#"{"a":1,"a":2}"#,
             schema: None,
+            options: RepairOptions::default(),
         })
         .unwrap_err();
         assert!(matches!(err, RepairError::Ambiguous(_)), "{err:?}");
@@ -1015,6 +1080,7 @@ mod tests {
             tool_name: "say",
             raw: r#"{"cmd": "say "hi" now"}"#,
             schema: None,
+            options: RepairOptions::default(),
         })
         .unwrap_err();
         assert_eq!(err.to_string(), "tool 'say': unescaped quote in a string");
@@ -1127,6 +1193,7 @@ mod tests {
             tool_name: "edit_file",
             raw: r#"{"path": "a.rs"}"#,
             schema: Some(&schema),
+            options: RepairOptions::default(),
         })
         .expect("alias");
         assert_eq!(repaired.value["file"], "a.rs");
@@ -1135,6 +1202,101 @@ mod tests {
                 .rewrites
                 .iter()
                 .any(|item| item.kind == RewriteKind::Alias)
+        );
+    }
+
+    #[test]
+    fn not_any_of_does_not_drop_an_unevaluated_key() {
+        let schema = json!({
+            "allOf": [{
+                "properties": {
+                    "a": {"not": {"anyOf": [{"type": "string"}, {"type": "integer"}]}}
+                }
+            }],
+            "properties": {"a": {"type": "string"}},
+            "type": "object",
+            "unevaluatedProperties": false
+        });
+        let err = normalize(&json!({"a": "1", "n": null}), &schema).expect_err("excluded string");
+        let text = err.to_string();
+        assert!(matches!(err, RepairError::Ambiguous(_)), "{text}");
+        assert!(text.contains("'a'"), "{text}");
+        assert!(text.contains("excluded by not"), "{text}");
+    }
+
+    #[test]
+    fn option_turns_off_path_backslashes_only() {
+        let raw = r#"{path: "C:\temp\file"}"#;
+        let on = repair_args(&RepairRequest::new("read", raw, None)).expect("on");
+        assert_eq!(on.value["path"], "C:\\temp\\file");
+        let mut options = RepairOptions::new();
+        options.path_backslashes = false;
+        let off =
+            repair_args(&RepairRequest::new("read", raw, None).with_options(options)).expect("off");
+        assert!(
+            off.rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::Syntax)
+        );
+        assert!(off.rewrites.iter().all(|item| {
+            !item.detail.contains("windows path") && !item.detail.contains("invalid escape")
+        }));
+        let text = off.value["path"].as_str().expect("string");
+        assert!(text.contains('\t'));
+        assert!(text.contains('\u{c}'));
+        assert!(!text.contains('\\'));
+    }
+
+    #[test]
+    fn option_turns_off_alias_renames() {
+        let schema = json!({"type": "object", "properties": {"path": {"type": "string"}}});
+        let raw = r#"{"file": "a.rs"}"#;
+        let on = repair_args(&RepairRequest::new("read", raw, Some(&schema))).expect("on");
+        assert_eq!(on.value["path"], "a.rs");
+        let mut options = RepairOptions::new();
+        options.aliases = false;
+        let off =
+            repair_args(&RepairRequest::new("read", raw, Some(&schema)).with_options(options))
+                .expect("off");
+        assert_eq!(off.value["file"], "a.rs");
+        assert!(off.value.get("path").is_none());
+
+        let aliased = json!({
+            "type": "object",
+            "properties": {"content": {"type": "string", "x-aliases": ["text"]}}
+        });
+        let raw = r#"{"text": "hi"}"#;
+        let on = repair_args(&RepairRequest::new("read", raw, Some(&aliased))).expect("alias on");
+        assert_eq!(on.value["content"], "hi");
+        let off =
+            repair_args(&RepairRequest::new("read", raw, Some(&aliased)).with_options(options))
+                .expect("alias off");
+        assert_eq!(off.value["text"], "hi");
+        assert!(off.value.get("content").is_none());
+    }
+
+    #[test]
+    fn option_turns_off_truncation_closing() {
+        let raw = r#"{"file": "a.rs""#;
+        let on = repair_args(&RepairRequest::new("read", raw, None)).expect("on");
+        assert!(
+            on.rewrites
+                .iter()
+                .any(|item| item.kind == RewriteKind::ClosedTruncation)
+        );
+        let mut options = RepairOptions::new();
+        options.truncation = false;
+        let err = repair_args(&RepairRequest::new("read", raw, None).with_options(options))
+            .expect_err("truncated");
+        assert!(matches!(err, RepairError::Unfixable(_)));
+        let bare = r#"{file: "a.rs"}"#;
+        let off = repair_args(&RepairRequest::new("read", bare, None).with_options(options))
+            .expect("bare key");
+        assert_eq!(off.value["file"], "a.rs");
+        assert!(
+            off.rewrites
+                .iter()
+                .all(|item| item.kind != RewriteKind::ClosedTruncation)
         );
     }
 
@@ -1770,6 +1932,7 @@ mod tests {
             tool_name: "edit_file",
             raw: r#"{"path": "a.rs"}"#,
             schema: None,
+            options: RepairOptions::default(),
         })
         .expect("valid");
         assert!(repaired.rewrites.is_empty());
@@ -1783,6 +1946,7 @@ mod tests {
             tool_name: "list",
             raw: " \n",
             schema: Some(&array),
+            options: RepairOptions::default(),
         })
         .expect("array");
         assert_eq!(repaired.value, json!([]));
@@ -1798,6 +1962,7 @@ mod tests {
             tool_name: "echo",
             raw: "",
             schema: Some(&text),
+            options: RepairOptions::default(),
         })
         .unwrap_err();
         assert!(
@@ -1810,6 +1975,7 @@ mod tests {
             tool_name: "count",
             raw: "\u{feff}",
             schema: Some(&number),
+            options: RepairOptions::default(),
         })
         .unwrap_err();
         assert!(matches!(err, RepairError::Unfixable(_)), "{err:?}");
@@ -1819,6 +1985,7 @@ mod tests {
             tool_name: "box",
             raw: "",
             schema: Some(&either),
+            options: RepairOptions::default(),
         })
         .unwrap_err();
         assert!(
@@ -1831,6 +1998,7 @@ mod tests {
             tool_name: "list",
             raw: "",
             schema: Some(&array_or_null),
+            options: RepairOptions::default(),
         })
         .expect("array or null");
         assert_eq!(repaired.value, json!([]));
@@ -1843,6 +2011,7 @@ mod tests {
                 tool_name: "edit_file",
                 raw,
                 schema: None,
+                options: RepairOptions::default(),
             })
             .unwrap_or_else(|err| panic!("{raw:?}: {err}"));
             assert_eq!(repaired.value, json!({}), "{raw:?}");
@@ -2217,6 +2386,7 @@ mod tests {
             tool_name: "edit_file",
             raw: "\u{a0}",
             schema: None,
+            options: RepairOptions::default(),
         })
         .expect("object");
         assert_eq!(repaired.value, json!({}));
@@ -2232,6 +2402,7 @@ mod tests {
             tool_name: "list",
             raw: "\u{a0}\n",
             schema: Some(&array),
+            options: RepairOptions::default(),
         })
         .expect("array");
         assert_eq!(repaired.value, json!([]));
@@ -3298,6 +3469,7 @@ mod tests {
             tool_name: "probe",
             raw: r#"{"path":"a.rs","line":"3"}"#,
             schema: Some(&schema),
+            options: RepairOptions::default(),
         })
         .expect("repair");
         assert_eq!(repaired.value, json!({"path": "a.rs", "line": 3}));
@@ -5889,6 +6061,7 @@ mod tests {
             tool_name: "deep",
             raw: &raw,
             schema: Some(&array_schema),
+            options: RepairOptions::default(),
         })
         .expect_err("repair_args past the parse limit");
         assert!(matches!(err, RepairError::Unfixable(_)), "{err:?}");

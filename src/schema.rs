@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
-use crate::{RepairError, Repaired, Rewrite, RewriteKind};
+use crate::{RepairError, RepairOptions, Repaired, Rewrite, RewriteKind};
 
 const PATH_KEYS: &[&str] = &["path", "file", "file_path", "filepath", "path_name"];
 
@@ -49,22 +49,34 @@ pub(crate) const NORMALIZE_DEPTH_LIMIT: usize = 128;
 /// `$dynamicRef` on this object, or on one of those branches, blocks
 /// dropping a key. The ref is not resolved.
 pub fn normalize(value: &Value, schema: &Value) -> Result<Repaired, RepairError> {
+    normalize_with(value, schema, RepairOptions::default())
+}
+
+pub(crate) fn normalize_with(
+    value: &Value,
+    schema: &Value,
+    options: RepairOptions,
+) -> Result<Repaired, RepairError> {
     if nested_too_deeply(value) {
         return Err(RepairError::Unfixable("value is nested too deeply".into()));
     }
-    let (next, rewrites) = normalize_child(value, schema)?;
+    let (next, rewrites) = normalize_child(value, schema, options)?;
     Ok(Repaired {
         value: next,
         rewrites,
     })
 }
 
-fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+fn normalize_child(
+    value: &Value,
+    schema: &Value,
+    options: RepairOptions,
+) -> Result<(Value, Vec<Rewrite>), RepairError> {
     // A tool object with no `properties` map stores the schema under
     // `parameters`. Keyword checks have to see that inner object, or
     // `if` / `then`, `not`, and `oneOf` are skipped while fields still coerce.
     let schema = schema_view(schema);
-    let (next, rewrites) = normalize_known(value, schema)?;
+    let (next, rewrites) = normalize_known(value, schema, options)?;
     if next != *value || !rewrites.is_empty() {
         if let Some(reason) = applicator_field_failure(schema, value, &next) {
             return Err(RepairError::Ambiguous(reason));
@@ -132,15 +144,19 @@ fn normalize_child(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
     Ok((next, rewrites))
 }
 
-fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
-    if let Some((next, rewrites)) = if_then_else(value, schema)? {
-        return enforce_outer_object(value, next, schema, rewrites);
+fn normalize_known(
+    value: &Value,
+    schema: &Value,
+    options: RepairOptions,
+) -> Result<(Value, Vec<Rewrite>), RepairError> {
+    if let Some((next, rewrites)) = if_then_else(value, schema, options)? {
+        return enforce_outer_object(value, next, schema, rewrites, options);
     }
-    if let Some((next, rewrites)) = all_of(value, schema)? {
-        return enforce_outer_object(value, next, schema, rewrites);
+    if let Some((next, rewrites)) = all_of(value, schema, options)? {
+        return enforce_outer_object(value, next, schema, rewrites, options);
     }
-    if let Some((next, rewrites)) = exclusive_branch(value, schema)? {
-        return enforce_outer_object(value, next, schema, rewrites);
+    if let Some((next, rewrites)) = exclusive_branch(value, schema, options)? {
+        return enforce_outer_object(value, next, schema, rewrites, options);
     }
     if let Some((next, rewrites)) = deep_constrained(value, schema) {
         return Ok((next, rewrites));
@@ -159,13 +175,13 @@ fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
         {
             let empty = Map::new();
             let props = props.unwrap_or(&empty);
-            let (normalized, more) = normalize_object(obj, schema, props)?;
+            let (normalized, more) = normalize_object(obj, schema, props, options)?;
             rewrites.extend(more);
             next = normalized;
             saw_object_schema = true;
         }
         if let Some(map) = next.as_object()
-            && let Some((updated, extra)) = apply_dependent_schemas(map, schema)?
+            && let Some((updated, extra)) = apply_dependent_schemas(map, schema, options)?
         {
             rewrites.extend(extra);
             return Ok((updated, rewrites));
@@ -177,7 +193,7 @@ fn normalize_known(value: &Value, schema: &Value) -> Result<(Value, Vec<Rewrite>
     if describes_array(schema)
         && let Some(arr) = coerced.as_array()
     {
-        let (next, more) = normalize_array(arr, schema)?;
+        let (next, more) = normalize_array(arr, schema, options)?;
         rewrites.extend(more);
         return Ok((next, rewrites));
     }
@@ -197,6 +213,7 @@ enum ArrayTail<'a> {
 fn apply_dependent_schemas(
     obj: &Map<String, Value>,
     schema: &Value,
+    options: RepairOptions,
 ) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let active = dependent_object_schemas(schema)
         .into_iter()
@@ -209,7 +226,7 @@ fn apply_dependent_schemas(
     let mut current = Value::Object(obj.clone());
     let mut rewrites = Vec::new();
     for branch in &active {
-        let (next, more) = normalize_child(&current, branch)?;
+        let (next, more) = normalize_child(&current, branch, options)?;
         if !branch_accepts(branch, &next) {
             return Ok(None);
         }
@@ -217,7 +234,7 @@ fn apply_dependent_schemas(
         rewrites.extend(more);
     }
     for branch in &active {
-        let (next, _) = normalize_child(&current, branch)?;
+        let (next, _) = normalize_child(&current, branch, options)?;
         if next != current || !branch_accepts(branch, &next) {
             return Ok(None);
         }
@@ -260,6 +277,7 @@ fn dependent_object_schemas(schema: &Value) -> Vec<(&str, &Value)> {
 fn if_then_else(
     value: &Value,
     schema: &Value,
+    options: RepairOptions,
 ) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     if schema.get("allOf").is_some()
         || schema.get("oneOf").is_some()
@@ -282,7 +300,7 @@ fn if_then_else(
     {
         return Ok(None);
     }
-    let if_hit = match normalize_child(value, if_schema) {
+    let if_hit = match normalize_child(value, if_schema, options) {
         Ok((probed, probe_rewrites)) if accepts_with_applicators(if_schema, &probed) => {
             Some((probed, probe_rewrites))
         }
@@ -295,15 +313,15 @@ fn if_then_else(
             }
             return Ok(Some((probed, probe_rewrites)));
         };
-        let (next, more) = match normalize_child(&probed, then_schema) {
+        let (next, more) = match normalize_child(&probed, then_schema, options) {
             Ok(pair) => pair,
-            Err(err) => return discard_conditional_error(value, schema, true, err),
+            Err(err) => return discard_conditional_error(value, schema, true, err, options),
         };
         let coerced = probed != *value || !probe_rewrites.is_empty();
         if !accepts_with_applicators(then_schema, &next) && coerced {
             // The `if` probe already coerced, so `then` did not see the original value.
-            if let Err(err) = normalize_child(value, then_schema) {
-                return discard_conditional_error(value, schema, true, err);
+            if let Err(err) = normalize_child(value, then_schema, options) {
+                return discard_conditional_error(value, schema, true, err, options);
             }
         }
         if !accepts_with_applicators(if_schema, &next)
@@ -321,9 +339,9 @@ fn if_then_else(
     let Some(else_schema) = else_schema else {
         return Ok(None);
     };
-    let (next, rewrites) = match normalize_child(value, else_schema) {
+    let (next, rewrites) = match normalize_child(value, else_schema, options) {
         Ok(pair) => pair,
-        Err(err) => return discard_conditional_error(value, schema, false, err),
+        Err(err) => return discard_conditional_error(value, schema, false, err, options),
     };
     if !accepts_with_applicators(else_schema, &next) {
         return Ok(None);
@@ -354,6 +372,7 @@ fn discard_conditional_error(
     schema: &Value,
     then_side: bool,
     err: RepairError,
+    options: RepairOptions,
 ) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let Some(if_schema) = schema.get("if") else {
         return Err(err);
@@ -364,7 +383,7 @@ fn discard_conditional_error(
         map.remove("then");
         map.remove("else");
     }
-    let (coerced, rewrites) = normalize_child(value, &stripped)?;
+    let (coerced, rewrites) = normalize_child(value, &stripped, options)?;
     if coerced == *value && rewrites.is_empty() {
         return Err(err);
     }
@@ -380,7 +399,11 @@ fn discard_conditional_error(
 /// A [`RepairError`] from a branch is not discarded.
 /// A coercion that a later branch rejects is [`RepairError::Ambiguous`].
 /// It is not reported as the original value.
-fn all_of(value: &Value, schema: &Value) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
+fn all_of(
+    value: &Value,
+    schema: &Value,
+    options: RepairOptions,
+) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let Some(branches) = single_applicator(schema, "allOf") else {
         return Ok(None);
     };
@@ -394,7 +417,7 @@ fn all_of(value: &Value, schema: &Value) -> Result<Option<(Value, Vec<Rewrite>)>
     let mut rewrites = Vec::new();
     let mut coerced = false;
     for branch in branches {
-        let (next, more) = normalize_child(&current, branch)?;
+        let (next, more) = normalize_child(&current, branch, options)?;
         let changed = next != current || !more.is_empty();
         if !branch_accepts(branch, &next) {
             if coerced || changed {
@@ -407,7 +430,7 @@ fn all_of(value: &Value, schema: &Value) -> Result<Option<(Value, Vec<Rewrite>)>
         rewrites.extend(more);
     }
     for branch in branches {
-        let (next, _) = normalize_child(&current, branch)?;
+        let (next, _) = normalize_child(&current, branch, options)?;
         if next != current || !branch_accepts(branch, &next) {
             if coerced || next != current {
                 return Err(RepairError::Ambiguous(schema_rejection(branch, &next)));
@@ -439,6 +462,7 @@ fn single_applicator<'a>(schema: &'a Value, key: &str) -> Option<&'a Vec<Value>>
 fn exclusive_branch(
     value: &Value,
     schema: &Value,
+    options: RepairOptions,
 ) -> Result<Option<(Value, Vec<Rewrite>)>, RepairError> {
     let Some(branches) =
         single_applicator(schema, "oneOf").or_else(|| single_applicator(schema, "anyOf"))
@@ -451,7 +475,7 @@ fn exclusive_branch(
     let mut matched = Vec::new();
     let mut branch_error = None;
     for branch in branches {
-        match normalize_child(value, branch) {
+        match normalize_child(value, branch, options) {
             Ok((next, rewrites)) => {
                 if branch_accepts(branch, &next) && branch_accepts(schema, &next) {
                     matched.push((next, rewrites));
@@ -486,7 +510,51 @@ fn violates_not(schema: &Value, value: &Value) -> bool {
     let Some(not_schema) = schema.get("not") else {
         return false;
     };
-    known_constraint(not_schema) && branch_accepts(not_schema, value)
+    // `branch_accepts` does not enter `anyOf`. A `not` around that
+    // applicator still excludes a value `settled` can judge. A bound
+    // that is not a number stays unchecked, same as before.
+    matches!(settled(not_schema, value), Settled::Yes) && not_is_checkable(not_schema)
+}
+
+fn not_is_checkable(schema: &Value) -> bool {
+    schema.get("type").is_some()
+        || schema.get("const").is_some()
+        || schema.get("enum").is_some()
+        || schema.get("properties").is_some()
+        || schema.get("required").is_some()
+        || schema.get("dependentRequired").is_some()
+        || schema.get("minLength").is_some()
+        || schema.get("maxLength").is_some()
+        || schema.get("propertyNames").is_some()
+        || schema.get("items").is_some()
+        || schema.get("prefixItems").is_some()
+        || schema.get("uniqueItems") == Some(&Value::Bool(true))
+        || numeric_keyword(schema, "minimum")
+        || numeric_keyword(schema, "maximum")
+        || numeric_keyword(schema, "exclusiveMinimum")
+        || numeric_keyword(schema, "exclusiveMaximum")
+        || numeric_keyword(schema, "multipleOf")
+        || schema.get("contains").is_some_and(Value::is_object)
+        || ["minItems", "maxItems", "minProperties", "maxProperties"]
+            .iter()
+            .any(|key| schema.get(*key).and_then(Value::as_u64).is_some())
+        || ["allOf", "anyOf", "oneOf"].iter().any(|key| {
+            schema
+                .get(*key)
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(not_is_checkable))
+        })
+        || schema.get("if").is_some_and(not_is_checkable)
+        || schema.get("then").is_some_and(not_is_checkable)
+        || schema.get("else").is_some_and(not_is_checkable)
+}
+
+fn numeric_keyword(schema: &Value, key: &str) -> bool {
+    schema.get(key).is_some_and(|bound| {
+        bound.as_i64().is_some()
+            || bound.as_u64().is_some()
+            || bound.as_f64().is_some_and(|number| number.is_finite())
+    })
 }
 
 /// `uniqueItems: true` refuses an array that repeats an item.
@@ -566,6 +634,7 @@ fn enforce_outer_object(
     next: Value,
     schema: &Value,
     mut rewrites: Vec<Rewrite>,
+    options: RepairOptions,
 ) -> Result<(Value, Vec<Rewrite>), RepairError> {
     if let Some(message) = outer_property_rejected(original, &next, schema) {
         return Err(RepairError::Ambiguous(message.to_string()));
@@ -579,7 +648,7 @@ fn enforce_outer_object(
         return Ok((next, rewrites));
     }
     let empty = Map::new();
-    let (normalized, more) = normalize_object(obj, schema, props.unwrap_or(&empty))?;
+    let (normalized, more) = normalize_object(obj, schema, props.unwrap_or(&empty), options)?;
     rewrites.extend(more);
     Ok((normalized, rewrites))
 }
@@ -886,69 +955,6 @@ fn exact_json_number(value: &Value) -> bool {
         return int as f64 == number && number as u64 == int;
     }
     true
-}
-
-fn known_constraint(schema: &Value) -> bool {
-    schema.get("type").is_some()
-        || schema.get("const").is_some()
-        || schema.get("enum").is_some()
-        || schema.get("properties").is_some()
-        || schema.get("required").is_some()
-        || schema.get("dependentRequired").is_some()
-        || schema.get("minLength").is_some()
-        || schema.get("maxLength").is_some()
-        || schema.get("propertyNames").is_some()
-        || schema.get("items").is_some()
-        || schema.get("prefixItems").is_some()
-        || checkable_bound(schema)
-        || checkable_multiple(schema)
-        || schema.get("uniqueItems") == Some(&Value::Bool(true))
-        || checkable_contains(schema)
-        || checkable_size(schema)
-}
-
-fn checkable_bound(schema: &Value) -> bool {
-    ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
-        .into_iter()
-        .any(|key| match schema.get(key) {
-            Some(bound) if bound.is_boolean() => {
-                let pair = if key.ends_with("Minimum") {
-                    "minimum"
-                } else {
-                    "maximum"
-                };
-                schema.get(pair).is_some_and(checkable_number)
-            }
-            Some(bound) => checkable_number(bound),
-            None => false,
-        })
-}
-
-fn checkable_number(bound: &Value) -> bool {
-    bound.as_i64().is_some()
-        || bound.as_u64().is_some()
-        || comparable_f64_bound(bound).is_some()
-        || finite_above_every_u64(bound)
-}
-
-fn checkable_multiple(schema: &Value) -> bool {
-    let Some(multiple) = schema.get("multipleOf").and_then(Value::as_number) else {
-        return false;
-    };
-    let Some(factor) = multiple.as_f64() else {
-        return false;
-    };
-    factor.is_finite() && factor > 0.0 && parse_decimal(&multiple.to_string()).is_some()
-}
-
-fn checkable_contains(schema: &Value) -> bool {
-    schema.get("contains").is_some_and(Value::is_object) && contain_limits(schema).is_some()
-}
-
-fn checkable_size(schema: &Value) -> bool {
-    ["minItems", "maxItems", "minProperties", "maxProperties"]
-        .into_iter()
-        .any(|key| integer_limit(schema, key).is_some())
 }
 
 /// An `allOf` property or item bound is checked after the outer schema
@@ -1915,7 +1921,11 @@ fn tuple_positions(schema: &Value) -> Option<(&Vec<Value>, ArrayTail<'_>)> {
     None
 }
 
-fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>), RepairError> {
+fn normalize_array(
+    arr: &[Value],
+    schema: &Value,
+    options: RepairOptions,
+) -> Result<(Value, Vec<Rewrite>), RepairError> {
     if let Some((positions, tail)) = tuple_positions(schema) {
         let tail = forbid_unevaluated_items(schema, tail);
         if matches!(tail, ArrayTail::Forbid) && arr.len() > positions.len() {
@@ -1927,13 +1937,13 @@ fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>
         let mut rewrites = Vec::new();
         for (index, item) in arr.iter().enumerate() {
             if let Some(position) = positions.get(index) {
-                let (next, more) = normalize_child(item, position)
+                let (next, more) = normalize_child(item, position, options)
                     .map_err(|err| prefix_index_error(index, err))?;
                 rewrites.extend(more);
                 out.push(next);
             } else if let ArrayTail::Schema(rest) = tail {
-                let (next, more) =
-                    normalize_child(item, rest).map_err(|err| prefix_index_error(index, err))?;
+                let (next, more) = normalize_child(item, rest, options)
+                    .map_err(|err| prefix_index_error(index, err))?;
                 rewrites.extend(more);
                 out.push(next);
             } else {
@@ -1957,7 +1967,7 @@ fn normalize_array(arr: &[Value], schema: &Value) -> Result<(Value, Vec<Rewrite>
     let mut rewrites = Vec::new();
     for (index, item) in arr.iter().enumerate() {
         let (next, more) =
-            normalize_child(item, items).map_err(|err| prefix_index_error(index, err))?;
+            normalize_child(item, items, options).map_err(|err| prefix_index_error(index, err))?;
         rewrites.extend(more);
         out.push(next);
     }
@@ -1985,12 +1995,13 @@ fn normalize_object(
     obj: &Map<String, Value>,
     schema: &Value,
     props: &Map<String, Value>,
+    options: RepairOptions,
 ) -> Result<(Value, Vec<Rewrite>), RepairError> {
     let mut out = Map::new();
     let mut rewrites = Vec::new();
     let mut unknown = Vec::new();
     let coverage = if denies_unknown(schema) {
-        applicator_coverage(schema, &Value::Object(obj.clone()))?
+        applicator_coverage(schema, &Value::Object(obj.clone()), options)?
     } else {
         ApplicatorCoverage::default()
     };
@@ -1998,13 +2009,18 @@ fn normalize_object(
 
     for (key, val) in obj {
         if let Some(prop_schema) = props.get(key) {
-            let (next, more) =
-                normalize_child(val, prop_schema).map_err(|err| prefix_property_error(key, err))?;
+            let (next, more) = normalize_child(val, prop_schema, options)
+                .map_err(|err| prefix_property_error(key, err))?;
             rewrites.extend(more);
             out.insert(key.clone(), next);
             continue;
         }
-        match alias_target(key, props)? {
+        let renamed = if options.aliases {
+            alias_target(key, props)?
+        } else {
+            None
+        };
+        match renamed {
             Some(target) => {
                 if (has_pattern_properties(schema) || coverage.open_pattern)
                     && (denies_unknown(schema) || additional_properties_schema(schema).is_some())
@@ -2027,10 +2043,10 @@ fn normalize_object(
                 // The canonical key may already have been coerced into `out`.
                 // Compare both sides after the property schema, so `"1"` and
                 // `1` agree, and key order does not change the result.
-                if let Some(canonical) = normalized_alias_side(obj, &out, target, props)? {
+                if let Some(canonical) = normalized_alias_side(obj, &out, target, props, options)? {
                     let alias = match props.get(target) {
                         Some(prop_schema) => {
-                            normalize_child(val, prop_schema)
+                            normalize_child(val, prop_schema, options)
                                 .map_err(|err| prefix_property_error(key, err))?
                                 .0
                         }
@@ -2051,7 +2067,7 @@ fn normalize_object(
                     unknown.push((key.clone(), val.clone()));
                     continue;
                 };
-                let (next, more) = normalize_child(val, prop_schema)
+                let (next, more) = normalize_child(val, prop_schema, options)
                     .map_err(|err| prefix_property_error(key, err))?;
                 rewrites.extend(more);
                 rewrites.push(rewrite(
@@ -2108,8 +2124,8 @@ fn normalize_object(
             )));
         }
         for (key, val) in unknown {
-            let (next, more) =
-                normalize_child(&val, extra).map_err(|err| prefix_property_error(&key, err))?;
+            let (next, more) = normalize_child(&val, extra, options)
+                .map_err(|err| prefix_property_error(&key, err))?;
             rewrites.extend(more);
             out.insert(key, next);
         }
@@ -2129,13 +2145,14 @@ fn normalized_alias_side(
     out: &Map<String, Value>,
     target: &str,
     props: &Map<String, Value>,
+    options: RepairOptions,
 ) -> Result<Option<Value>, RepairError> {
     if let Some(raw) = obj.get(target) {
         let Some(prop_schema) = props.get(target) else {
             return Ok(Some(raw.clone()));
         };
-        let (value, _) =
-            normalize_child(raw, prop_schema).map_err(|err| prefix_property_error(target, err))?;
+        let (value, _) = normalize_child(raw, prop_schema, options)
+            .map_err(|err| prefix_property_error(target, err))?;
         return Ok(Some(value));
     }
     Ok(out.get(target).cloned())
@@ -2323,9 +2340,10 @@ struct ApplicatorCoverage {
 fn applicator_coverage(
     schema: &Value,
     instance: &Value,
+    options: RepairOptions,
 ) -> Result<ApplicatorCoverage, RepairError> {
     let mut coverage = ApplicatorCoverage::default();
-    collect_applicators(schema_view(schema), instance, &mut coverage)?;
+    collect_applicators(schema_view(schema), instance, &mut coverage, options)?;
     Ok(coverage)
 }
 
@@ -2374,6 +2392,7 @@ fn collect_applicators(
     schema: &Value,
     instance: &Value,
     coverage: &mut ApplicatorCoverage,
+    options: RepairOptions,
 ) -> Result<(), RepairError> {
     note_unresolved_ref(schema, coverage);
     let Some(map) = schema.as_object() else {
@@ -2383,8 +2402,8 @@ fn collect_applicators(
         for branch in branches {
             guard_allof_properties(branch, coverage);
             mention_applicator(branch, &mut coverage.mentioned);
-            match branch_result(branch, instance) {
-                Ok(true) => evaluate_branch(branch, instance, coverage)?,
+            match branch_result(branch, instance, options) {
+                Ok(true) => evaluate_branch(branch, instance, coverage, options)?,
                 Ok(false) => {}
                 Err(err) => return Err(err),
             }
@@ -2393,8 +2412,8 @@ fn collect_applicators(
     if let Some(branches) = map.get("anyOf").and_then(Value::as_array) {
         for branch in branches {
             mention_applicator(branch, &mut coverage.mentioned);
-            if branch_accepted(branch, instance) {
-                evaluate_branch(branch, instance, coverage)?;
+            if branch_accepted(branch, instance, options) {
+                evaluate_branch(branch, instance, coverage, options)?;
             }
         }
     }
@@ -2402,12 +2421,12 @@ fn collect_applicators(
         let mut matched = Vec::new();
         for branch in branches {
             mention_applicator(branch, &mut coverage.mentioned);
-            if branch_accepted(branch, instance) {
+            if branch_accepted(branch, instance, options) {
                 matched.push(branch);
             }
         }
         if matched.len() == 1 {
-            evaluate_branch(matched[0], instance, coverage)?;
+            evaluate_branch(matched[0], instance, coverage, options)?;
         }
     }
     if let Some(if_schema) = map.get("if") {
@@ -2418,19 +2437,19 @@ fn collect_applicators(
         if let Some(else_schema) = map.get("else") {
             mention_applicator(else_schema, &mut coverage.mentioned);
         }
-        if branch_accepted(if_schema, instance) {
+        if branch_accepted(if_schema, instance, options) {
             // A successful `if` evaluates its own properties, not only `then`.
-            evaluate_branch(if_schema, instance, coverage)?;
+            evaluate_branch(if_schema, instance, coverage, options)?;
             if let Some(then_schema) = map.get("then")
-                && branch_accepted(then_schema, instance)
+                && branch_accepted(then_schema, instance, options)
             {
-                evaluate_branch(then_schema, instance, coverage)?;
+                evaluate_branch(then_schema, instance, coverage, options)?;
             }
         } else if !unchecked_string_keyword(if_schema)
             && let Some(else_schema) = map.get("else")
-            && branch_accepted(else_schema, instance)
+            && branch_accepted(else_schema, instance, options)
         {
-            evaluate_branch(else_schema, instance, coverage)?;
+            evaluate_branch(else_schema, instance, coverage, options)?;
         }
     }
     for (trigger, sub) in dependent_object_schemas(schema) {
@@ -2442,8 +2461,8 @@ fn collect_applicators(
         }
         guard_allof_properties(sub, coverage);
         mention_applicator(sub, &mut coverage.mentioned);
-        match branch_result(sub, instance) {
-            Ok(true) => evaluate_branch(sub, instance, coverage)?,
+        match branch_result(sub, instance, options) {
+            Ok(true) => evaluate_branch(sub, instance, coverage, options)?,
             Ok(false) => {
                 if has_pattern_properties(sub) {
                     coverage.open_pattern = true;
@@ -2459,6 +2478,7 @@ fn evaluate_branch(
     schema: &Value,
     instance: &Value,
     coverage: &mut ApplicatorCoverage,
+    options: RepairOptions,
 ) -> Result<(), RepairError> {
     if let Some(props) = schema.get("properties").and_then(Value::as_object) {
         coverage.evaluated.extend(props.keys().cloned());
@@ -2466,7 +2486,7 @@ fn evaluate_branch(
     if has_pattern_properties(schema) {
         coverage.open_pattern = true;
     }
-    collect_applicators(schema, instance, coverage)
+    collect_applicators(schema, instance, coverage, options)
 }
 
 fn guard_allof_properties(schema: &Value, coverage: &mut ApplicatorCoverage) {
@@ -2508,15 +2528,19 @@ fn mention_applicator(schema: &Value, mentioned: &mut BTreeSet<String>) {
 
 /// Whether this branch accepts `instance` after its own coercion.
 /// The caller's object is left as it is. Callers decide which errors count.
-fn branch_result(branch: &Value, instance: &Value) -> Result<bool, RepairError> {
-    match normalize_child(instance, branch) {
+fn branch_result(
+    branch: &Value,
+    instance: &Value,
+    options: RepairOptions,
+) -> Result<bool, RepairError> {
+    match normalize_child(instance, branch, options) {
         Ok((next, _)) => Ok(branch_accepts(branch, &next)),
         Err(err) => Err(err),
     }
 }
 
-fn branch_accepted(branch: &Value, instance: &Value) -> bool {
-    matches!(branch_result(branch, instance), Ok(true))
+fn branch_accepted(branch: &Value, instance: &Value, options: RepairOptions) -> bool {
+    matches!(branch_result(branch, instance, options), Ok(true))
 }
 
 fn refuse_covered_unknown(

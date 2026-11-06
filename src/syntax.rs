@@ -55,7 +55,7 @@ fn syntax_note(detail: &str) -> Rewrite {
     }
 }
 
-pub(crate) fn apply_stages(raw: &str) -> Result<Staged, RepairError> {
+pub(crate) fn apply_stages(raw: &str, path_backslashes: bool) -> Result<Staged, RepairError> {
     let mut text = raw.to_string();
     let mut repairs = Vec::new();
 
@@ -84,10 +84,12 @@ pub(crate) fn apply_stages(raw: &str) -> Result<Staged, RepairError> {
         text = cleaned;
     }
 
-    let passed = pass_string_backslashes(&text);
-    if passed.text != text {
-        repairs.extend(passed.repairs);
-        text = passed.text;
+    if path_backslashes {
+        let passed = pass_string_backslashes(&text);
+        if passed.text != text {
+            repairs.extend(passed.repairs);
+            text = passed.text;
+        }
     }
 
     let cleaned = escape_controls_in_strings(&text);
@@ -223,7 +225,7 @@ pub(crate) fn repair_tool_call_json(raw: &str) -> RepairOutcome {
     if let Ok(value) = serde_json::from_str(&passed.text) {
         return outcome_with_unique_keys(&passed.text, value, passed.repairs);
     }
-    let staged = match apply_stages(&passed.text) {
+    let staged = match apply_stages(&passed.text, true) {
         Ok(staged) => staged,
         Err(RepairError::Ambiguous(reason)) => return RepairOutcome::Ambiguous(reason),
         Err(RepairError::Unfixable(reason)) => return RepairOutcome::Unfixable(reason),
