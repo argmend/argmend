@@ -36,7 +36,8 @@ pub(crate) const NORMALIZE_DEPTH_LIMIT: usize = 128;
 ///
 /// A `parameters` object is the schema when this object is a tool wrapper,
 /// not a JSON Schema. A schema `type`, `properties`, or another schema
-/// keyword keeps this object. `name` and `description` do not. `if` /
+/// keyword keeps this object. `name`, `description`, and a `required`
+/// list do not. `if` /
 /// `then`, `not`, and `oneOf` on that inner object still apply.
 /// An `if` schema that does not match does not apply `then`. `allOf`,
 /// `oneOf`, `anyOf`, and a nested `if` inside that condition count.
@@ -2585,10 +2586,12 @@ fn is_json_schema(schema: &Value) -> bool {
     looks_like_json_schema(schema) || has_schema_keyword(schema)
 }
 
-/// Keywords that make this object the schema. `name` and `description`
-/// are absent, so a tool wrapper still unwraps `parameters`.
-/// `$schema`, `$id`, `$defs`, and `definitions` are included because a
-/// schema document often has no `type` yet.
+/// Keywords that make this object the schema. `name`, `description`,
+/// and `required` are absent. A tool definition lists required parameter
+/// names beside `parameters`, and that list is not the instance schema.
+/// A schema that also has `type`, `properties`, or a keyword in this
+/// list stays that schema. `$schema`, `$id`, `$defs`, and `definitions`
+/// are included because a schema document often has no `type` yet.
 fn has_schema_keyword(schema: &Value) -> bool {
     let Some(map) = schema.as_object() else {
         return false;
@@ -2620,7 +2623,6 @@ fn has_schema_keyword(schema: &Value) -> bool {
         "dependentSchemas",
         "dependencies",
         "dependentRequired",
-        "required",
         "items",
         "prefixItems",
         "contains",

@@ -83,10 +83,12 @@ Pass a tool schema with `repair_args` when you have one. A value nested more tha
 Argmend reads the schema from:
 
 - the object you pass, when that object is already a JSON Schema
-- a `parameters` object, when the outer object is not already a JSON Schema (`name` and `description` still unwrap)
+- a `parameters` object, when the outer object is not already a JSON Schema (`name`, `description`, and `required` do not make it one)
 - OpenAI `function.parameters`
 - Anthropic `input_schema`
 - MCP `inputSchema`
+
+`required` beside `parameters` is that tool's parameter list. The object under `parameters` is still the schema. A schema that already has `type`, `properties`, or another schema keyword stays that schema, including when it also lists `required`.
 
 `if`, `then`, `not`, and `oneOf` still apply on a `parameters` object, and inside an extracted tool schema. `{"a":"1"}` against an integer property `a` becomes `{"a": 1}`.
 
