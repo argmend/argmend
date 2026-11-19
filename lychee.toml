@@ -1,0 +1,13 @@
+max_retries = 5
+retry_wait_time = 3
+max_concurrency = 4
+
+# Release-please writes a commit URL on every changelog line. Checking
+# those pages together makes GitHub return 503. README and the other
+# docs stay checked.
+exclude_path = ["CHANGELOG.md"]
+
+exclude = [
+  "github\\.com/argmend/argmend/actions/workflows/fossa\\.yml/badge\\.svg",
+  "github\\.com/argmend/argmend/compare/v.*\\.\\.\\.v",
+]
