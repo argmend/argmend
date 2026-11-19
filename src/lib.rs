@@ -133,20 +133,24 @@ impl Default for RepairOptions {
 /// Arguments plus an optional JSON schema.
 ///
 /// Build this with [`RepairRequest::new`]. A later field is not required.
-/// [`RepairRequest::with_options`] turns one repair family off.
+/// [`RepairRequest::with_options`] replaces the repair switches.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct RepairRequest<'a> {
     pub tool_name: &'a str,
     pub raw: &'a str,
     pub schema: Option<&'a Value>,
-    /// Repairs that stay on. [`RepairRequest::new`] uses [`RepairOptions::default`].
+    /// Repair switches. [`RepairRequest::new`] uses [`RepairOptions::default`]:
+    /// path, alias, and truncation stay on. `embedded_json`, `leading_prose`,
+    /// and `wrap_scalar` stay off.
     pub options: RepairOptions,
 }
 
 impl<'a> RepairRequest<'a> {
     /// One tool call. `schema` is `None` when the host has no schema.
-    /// Every repair stays on.
+    /// Path, alias, and truncation repairs stay on. `embedded_json`,
+    /// `leading_prose`, and `wrap_scalar` stay off until
+    /// [`RepairRequest::with_options`] sets them.
     pub fn new(tool_name: &'a str, raw: &'a str, schema: Option<&'a Value>) -> Self {
         Self {
             tool_name,
