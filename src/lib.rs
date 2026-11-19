@@ -506,7 +506,10 @@ fn blank_value(schema: Option<&Value>) -> Result<Value, RepairError> {
 ///
 /// An OpenAI tool (`function.parameters` or `type: function` with
 /// `parameters`), an Anthropic `input_schema`, or an MCP `inputSchema`
-/// is the JSON Schema. A tool shape with no object schema is unfixable.
+/// is the JSON Schema. A `required` list beside `parameters` names those
+/// parameters. The object under `parameters` stays the schema when the
+/// outer object has no `type`, `properties`, or other schema keyword.
+/// A tool shape with no object schema is unfixable.
 /// Any other object is still the schema itself.
 ///
 /// ```
@@ -6778,6 +6781,100 @@ mod tests {
         let repaired = normalize(&json!("1"), &identified).expect("id keeps the schema");
         assert_eq!(repaired.value, "1");
         assert!(repaired.rewrites.is_empty());
+    }
+
+    #[test]
+    fn required_beside_parameters_uses_the_parameter_schema() {
+        let parameters = json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "n": {"type": "integer"}
+            }
+        });
+        let wrapper = json!({
+            "name": "read",
+            "description": "read a file",
+            "required": ["path"],
+            "parameters": parameters
+        });
+        let input = json!({"path": "a.rs", "n": "1"});
+        let repaired = normalize(&input, &wrapper).expect("normalize");
+        assert_eq!(repaired.value["n"], 1);
+        assert_eq!(repaired.value["path"], "a.rs");
+
+        let repaired = repair_args(&RepairRequest::new(
+            "read",
+            r#"{"path":"a.rs","n":"1"}"#,
+            Some(&wrapper),
+        ))
+        .expect("repair_args");
+        assert_eq!(repaired.value["n"], 1);
+
+        let plain = json!({
+            "name": "read",
+            "description": "read a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "n": {"type": "integer"}
+                }
+            }
+        });
+        let repaired = normalize(&input, &plain).expect("without required");
+        assert_eq!(repaired.value["n"], 1);
+
+        let root = json!({"type": "integer", "parameters": {"type": "string"}});
+        let repaired = normalize(&json!("1"), &root).expect("root integer");
+        assert_eq!(repaired.value, 1);
+
+        let kept = json!({
+            "type": "object",
+            "properties": {"n": {"type": "integer"}},
+            "required": ["n"],
+            "parameters": {"type": "string"}
+        });
+        let repaired = normalize(&json!({"n": "1"}), &kept).expect("properties stay");
+        assert_eq!(repaired.value["n"], 1);
+
+        let documented = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "required": ["n"],
+            "parameters": {"type": "integer"}
+        });
+        let repaired = normalize(&json!("1"), &documented).expect("schema document");
+        assert_eq!(repaired.value, "1");
+
+        let listed = json!({
+            "name": "read",
+            "description": "lines",
+            "required": ["path"],
+            "parameters": {"type": "array"}
+        });
+        let repaired =
+            repair_args(&RepairRequest::new("read", "  ", Some(&listed))).expect("blank array");
+        assert_eq!(repaired.value, json!([]));
+
+        let inner = json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "n": {"type": "integer"}
+            }
+        });
+        for wrapper in [
+            json!({"name": "read", "required": ["path"], "input_schema": inner.clone()}),
+            json!({"name": "read", "required": ["path"], "inputSchema": inner.clone()}),
+            json!({
+                "type": "function",
+                "required": ["path"],
+                "parameters": inner
+            }),
+        ] {
+            let repaired = normalize(&input, &wrapper).expect("wrapper");
+            assert_eq!(repaired.value["n"], 1, "{wrapper}");
+        }
     }
 
     #[test]
