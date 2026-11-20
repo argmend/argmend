@@ -3413,6 +3413,24 @@ mod tests {
             "C:\\Users\\sebta\\a[1].txt",
         );
         one_path(
+            r"{path: C:\Users\sebta\report #2.txt}",
+            "path",
+            "C:\\Users\\sebta\\report #2.txt",
+        );
+        one_path(
+            r"{path: C:\Users\sebta\file#1.txt}",
+            "path",
+            "C:\\Users\\sebta\\file#1.txt",
+        );
+        match repair_json(r"{path: C:\a.rs # note}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["path"], "C:\\a.rs"),
+            other => panic!("comment after a path -> {other:?}"),
+        }
+        match repair_json("{a: 1} # note") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("hash comment -> {other:?}"),
+        }
+        one_path(
             "{path: C:/Users/sebta/a.rs, line: 3}",
             "path",
             "C:/Users/sebta/a.rs",
