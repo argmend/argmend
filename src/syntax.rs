@@ -31,7 +31,9 @@ use super::{RepairError, Rewrite, RewriteKind};
 /// 12. Replace Python triple quotes.
 /// 13. Replace unicode whitespace between tokens.
 /// 14. Replace `=` and `=>` between a key and a value.
-/// 15. Quote an unquoted drive path or `scheme://` value.
+/// 15. Quote an unquoted drive path or `scheme://` value. A `{` that
+///     opens inside that path, and the `}` that closes it, stay in the
+///     path. A second path after a finished one is quoted too.
 /// 16. Insert a missing colon. A later word in a bare phrase is not a new key.
 ///     An unescaped quote after a finished string value is ambiguous.
 /// 17. Quote bare keys.
@@ -1691,6 +1693,8 @@ fn is_quoted_path_char(ch: char) -> bool {
                 | '*'
                 | '['
                 | ']'
+                | '{'
+                | '}'
         )
 }
 
@@ -1715,11 +1719,13 @@ pub(crate) fn quote_unquoted_paths(s: &str) -> String {
             index = next;
             continue;
         }
-        if matches!(prev_sig, Some(':' | '[' | ',' | '='))
+        // The quote emitted here is the previous token. The source still
+        // ends on the last letter of the path, which is not a separator.
+        if prev_sig.is_some_and(opens_unquoted_path)
             && let Some(end) = unquoted_path_end(&chars, index)
         {
             push_json_string(&mut out, &chars[index..end]);
-            prev_sig = sig_before(&chars, end);
+            prev_sig = Some('"');
             index = end;
             continue;
         }
@@ -1798,6 +1804,7 @@ fn preceded_by_ident(chars: &[char], index: usize) -> bool {
 fn consume_unquoted_path(chars: &[char], start: usize) -> usize {
     let mut index = start;
     let mut brackets = 0usize;
+    let mut braces = 0usize;
     loop {
         while index < chars.len() && is_unquoted_path_char(chars[index]) {
             if chars[index] == '[' {
@@ -1809,6 +1816,19 @@ fn consume_unquoted_path(chars: &[char], start: usize) -> usize {
         // ends an array.
         if index < chars.len() && chars[index] == ']' && brackets > 0 {
             brackets -= 1;
+            index += 1;
+            continue;
+        }
+        // `{notes}` and `{ABCDEF}` stay in the path. A `}` with no open
+        // brace still ends the object. `{` is not a path character, so a
+        // value that starts with `{` is still a nested object.
+        if index < chars.len() && chars[index] == '{' {
+            braces += 1;
+            index += 1;
+            continue;
+        }
+        if index < chars.len() && chars[index] == '}' && braces > 0 {
+            braces -= 1;
             index += 1;
             continue;
         }
@@ -1829,6 +1849,16 @@ fn consume_unquoted_path(chars: &[char], start: usize) -> usize {
 
 fn unquoted_path_continues(chars: &[char], index: usize) -> bool {
     if index >= chars.len() || !is_unquoted_path_char(chars[index]) {
+        return false;
+    }
+    // `\\server\share` after a space is the next path, not more of this one.
+    // A drive letter is already refused below, because `C:` looks like a key.
+    if chars.get(index) == Some(&'\\')
+        && chars.get(index + 1) == Some(&'\\')
+        && chars
+            .get(index + 2)
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+    {
         return false;
     }
     if starts_bare_word(chars[index]) {
@@ -1884,8 +1914,68 @@ fn is_url_char(ch: char) -> bool {
     is_unquoted_path_char(ch) || ch == '?'
 }
 
+fn opens_unquoted_path(ch: char) -> bool {
+    matches!(ch, ':' | '[' | ',' | '=' | '"')
+}
+
 fn path_value_position(chars: &[char], index: usize) -> bool {
-    matches!(sig_before(chars, index), Some(':' | '[' | ',' | '='))
+    sig_before(chars, index).is_some_and(opens_unquoted_path) || follows_finished_path(chars, index)
+}
+
+/// `[C:\a.txt C://b]` is two paths. The second drive is not after `:`,
+/// `[`, `,`, or `=`. It follows the first path, with only whitespace
+/// between them.
+fn follows_finished_path(chars: &[char], index: usize) -> bool {
+    let mut prev = index;
+    while prev > 0 && chars[prev - 1].is_ascii_whitespace() {
+        prev -= 1;
+    }
+    if prev == 0 || prev == index {
+        return false;
+    }
+    let mut cursor = 0;
+    while cursor < prev {
+        if opens_unquoted_path(chars[cursor]) {
+            let mut value = cursor + 1;
+            while value < chars.len() && chars[value].is_ascii_whitespace() {
+                value += 1;
+            }
+            if let Some(end) = unquoted_path_end(chars, value)
+                && path_ends_at(chars, end, prev)
+            {
+                return true;
+            }
+        }
+        cursor += 1;
+    }
+    false
+}
+
+fn path_after(chars: &[char], end: usize) -> Option<usize> {
+    let mut next = end;
+    while next < chars.len() && chars[next].is_ascii_whitespace() {
+        next += 1;
+    }
+    if next == end {
+        return None;
+    }
+    let next_end = unquoted_path_end(chars, next)?;
+    (next_end > end).then_some(next_end)
+}
+
+fn path_ends_at(chars: &[char], mut end: usize, target: usize) -> bool {
+    loop {
+        if end == target {
+            return true;
+        }
+        if end > target {
+            return false;
+        }
+        let Some(next_end) = path_after(chars, end) else {
+            return false;
+        };
+        end = next_end;
+    }
 }
 
 fn sig_before(chars: &[char], index: usize) -> Option<char> {
@@ -2238,19 +2328,21 @@ fn hash_is_inside_unquoted_path(chars: &[char], hash: usize) -> bool {
     let Some(next) = chars.get(hash + 1) else {
         return false;
     };
-    if !is_unquoted_path_char(*next) {
+    // `# note` is a comment. `#2` and `{report #2}` stay in the path.
+    // A closer that the path does not consume still ends the value.
+    if next.is_whitespace() {
         return false;
     }
     let mut index = 0;
     while index < hash {
-        if matches!(chars[index], ':' | '[' | ',' | '=') {
+        if opens_unquoted_path(chars[index]) {
             let mut value = index + 1;
             while value < chars.len() && chars[value].is_ascii_whitespace() {
                 value += 1;
             }
             if value <= hash
                 && let Some(end) = unquoted_path_end(chars, value)
-                && end > hash
+                && path_covers_hash(chars, end, hash)
             {
                 return true;
             }
@@ -2258,6 +2350,20 @@ fn hash_is_inside_unquoted_path(chars: &[char], hash: usize) -> bool {
         index += 1;
     }
     false
+}
+
+/// The hash is inside this path, or inside a later path that is only a
+/// whitespace gap away (`[C:\a #1.txt C:\b #2.txt]`).
+fn path_covers_hash(chars: &[char], mut end: usize, hash: usize) -> bool {
+    loop {
+        if end > hash + 1 {
+            return true;
+        }
+        let Some(next_end) = path_after(chars, end) else {
+            return false;
+        };
+        end = next_end;
+    }
 }
 
 fn comment_can_start(chars: &[char], index: usize) -> bool {
