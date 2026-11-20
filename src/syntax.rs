@@ -2233,6 +2233,33 @@ fn is_numeric_token(token: &[char]) -> bool {
 /// A comment starts at a token boundary. Whitespace, a bracket, a comma, a
 /// colon, a quote, a finished number, or a finished literal counts. A mark
 /// glued to a bare word (`a//b`, `x#y`) stays in that word.
+/// `#2.txt` after a space is still the Windows path. `# note` is a comment.
+fn hash_is_inside_unquoted_path(chars: &[char], hash: usize) -> bool {
+    let Some(next) = chars.get(hash + 1) else {
+        return false;
+    };
+    if !is_unquoted_path_char(*next) {
+        return false;
+    }
+    let mut index = 0;
+    while index < hash {
+        if matches!(chars[index], ':' | '[' | ',' | '=') {
+            let mut value = index + 1;
+            while value < chars.len() && chars[value].is_ascii_whitespace() {
+                value += 1;
+            }
+            if value <= hash
+                && let Some(end) = unquoted_path_end(chars, value)
+                && end > hash
+            {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
 fn comment_can_start(chars: &[char], index: usize) -> bool {
     if index == 0 {
         return true;
@@ -3035,6 +3062,11 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                 }
             }
             '#' if comment_can_start(&chars, i) => {
+                if hash_is_inside_unquoted_path(&chars, i) {
+                    out.push('#');
+                    i += 1;
+                    continue;
+                }
                 i += 1;
                 while i < len && chars[i] != '\n' {
                     i += 1;
