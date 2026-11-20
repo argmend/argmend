@@ -885,6 +885,9 @@ fn quoted_path_char(ch: char) -> bool {
                 | '*'
                 | '['
                 | ']'
+                | '{'
+                | '}'
+                | '\u{2019}'
         )
 }
 

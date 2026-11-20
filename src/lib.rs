@@ -195,7 +195,8 @@ pub enum RepairError {
 /// An unescaped quote inside a string is Ambiguous too.
 /// A Windows path keeps its backslashes, including one inside a sentence.
 /// A JSON escape after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays that escape.
-/// An unquoted drive path is one string.
+/// An unquoted drive path is one string. A `{...}` inside that path
+/// stays there, and a missing comma between two of those paths is inserted.
 /// A sentence after one object or array is removed, as in `{"a": 1}`
 /// followed by `Done.`. The same sentence before the value, as in
 /// `Here is the call: {"a": 1}`, stays unfixable. A markdown fence that
@@ -3540,6 +3541,210 @@ mod tests {
             matches!(repair_json("{a://note}"), RepairOutcome::Unfixable(_)),
             "a key colon and // is still a comment"
         );
+    }
+
+    #[test]
+    fn unquoted_windows_path_keeps_braces_and_the_next_path() {
+        fn one_path(raw: &str, key: &str, expected: &str) {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, .. } => {
+                    assert_eq!(value[key], expected, "{raw} {value}");
+                }
+                other => panic!("{raw:?} -> {other:?}"),
+            }
+        }
+
+        one_path(
+            r"{path: C:\temp\{notes}.txt}",
+            "path",
+            "C:\\temp\\{notes}.txt",
+        );
+        one_path(
+            r"{path: C:\Windows\Installer\{ABCDEF}\file.txt}",
+            "path",
+            "C:\\Windows\\Installer\\{ABCDEF}\\file.txt",
+        );
+        one_path(r"{path: C:\temp\a{1}.txt}", "path", "C:\\temp\\a{1}.txt");
+        one_path(
+            r"{path: C:\Program Files\{GUID}\file.txt}",
+            "path",
+            "C:\\Program Files\\{GUID}\\file.txt",
+        );
+        one_path(
+            r"{path: C:\Program Files\{My App}\a.txt}",
+            "path",
+            "C:\\Program Files\\{My App}\\a.txt",
+        );
+        one_path(
+            r"{path: C:\temp\{file name}.txt}",
+            "path",
+            "C:\\temp\\{file name}.txt",
+        );
+        one_path(r"{path: C:\a[#].txt}", "path", "C:\\a[#].txt");
+        one_path(
+            r"{path: C:\temp\{{id}}.txt}",
+            "path",
+            "C:\\temp\\{{id}}.txt",
+        );
+        one_path(
+            r"{path: C:\temp\{report #2}.txt}",
+            "path",
+            "C:\\temp\\{report #2}.txt",
+        );
+        one_path(
+            r"{path: \\server\share\{id}\a.txt}",
+            "path",
+            "\\\\server\\share\\{id}\\a.txt",
+        );
+        one_path(
+            r"{path: C:\temp\{notes}.txt, line: 4}",
+            "path",
+            "C:\\temp\\{notes}.txt",
+        );
+        match repair_json(r"{path: C:\temp\{notes}.txt, line: 4}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["line"], 4),
+            other => panic!("sibling after a brace path -> {other:?}"),
+        }
+        match repair_json(r"{path: C:\temp\{notes}.txt # note}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\temp\\{notes}.txt");
+            }
+            other => panic!("comment after a brace path -> {other:?}"),
+        }
+        match repair_json(r"{cmd: {file: C:\a.txt}}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["cmd"]["file"], "C:\\a.txt");
+            }
+            other => panic!("nested object -> {other:?}"),
+        }
+        match repair_json(r"{items: [C:\a.txt {b: 1}]}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["items"][0], "C:\\a.txt");
+                assert_eq!(value["items"][1]["b"], 1);
+            }
+            other => panic!("object after a path -> {other:?}"),
+        }
+        match repair_json(r"{path: C:\temp\{notes}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\temp\\{notes}");
+            }
+            other => panic!("truncated object keeps the brace pair -> {other:?}"),
+        }
+        assert!(
+            matches!(
+                repair_json(r"{path: C:\a.txt C:\b.txt}"),
+                RepairOutcome::Unfixable(_)
+            ),
+            "two paths in one field stay unfixable"
+        );
+        match repair_json(r"{path: C:\temp\a}.txt}") {
+            RepairOutcome::Unfixable(message) => {
+                assert!(message.contains("trailing"), "{message}");
+            }
+            other => panic!("unmatched brace -> {other:?}"),
+        }
+        match repair_json(r#"{"path": "C:\Windows\Installer\{ABCDEF}\file.txt"}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\Windows\\Installer\\{ABCDEF}\\file.txt");
+            }
+            other => panic!("quoted brace path -> {other:?}"),
+        }
+
+        fn two(raw: &str, first: &str, second: &str) {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, .. } => {
+                    assert_eq!(value.as_array().map(Vec::len), Some(2), "{raw} {value}");
+                    assert_eq!(value[0], first, "{raw}");
+                    assert_eq!(value[1], second, "{raw}");
+                }
+                other => panic!("{raw:?} -> {other:?}"),
+            }
+        }
+
+        two(r"[C:\a.txt C:\b.txt]", "C:\\a.txt", "C:\\b.txt");
+        two(r"[C:\a.txt  C:\b.txt]", "C:\\a.txt", "C:\\b.txt");
+        two(r"[C:\a.txt, C:\b.txt]", "C:\\a.txt", "C:\\b.txt");
+        two(r"[C:\a #1.txt C:\b #2.txt]", "C:\\a #1.txt", "C:\\b #2.txt");
+        two(r"[C:\a.txt C://Users/b.rs]", "C:\\a.txt", "C://Users/b.rs");
+        two(r#"["C:\\a.txt" C:\b.txt]"#, "C:\\a.txt", "C:\\b.txt");
+        two(
+            r"[C:\a.txt \\server\share\b.txt]",
+            "C:\\a.txt",
+            "\\\\server\\share\\b.txt",
+        );
+        two(
+            r"[\\server\a.txt \\server\b.txt]",
+            "\\\\server\\a.txt",
+            "\\\\server\\b.txt",
+        );
+        two(
+            "[http://a.com https://b.com]",
+            "http://a.com",
+            "https://b.com",
+        );
+        match repair_json(r"[C:\a.txt C:\b.txt C:\c.txt]") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value.as_array().map(Vec::len), Some(3), "{value}");
+                assert_eq!(value[0], "C:\\a.txt");
+                assert_eq!(value[1], "C:\\b.txt");
+                assert_eq!(value[2], "C:\\c.txt");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("three paths -> {other:?}"),
+        }
+        match repair_json(r"{files: [C:\a[1].txt C:\b[2].txt]}") {
+            RepairOutcome::Repaired { value, repairs } => {
+                assert_eq!(value["files"][0], "C:\\a[1].txt");
+                assert_eq!(value["files"][1], "C:\\b[2].txt");
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("bracket paths -> {other:?}"),
+        }
+        match repair_json(r"{files: [C:\a{1}.txt C:\b{2}.txt]}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["files"][0], "C:\\a{1}.txt");
+                assert_eq!(value["files"][1], "C:\\b{2}.txt");
+            }
+            other => panic!("brace paths -> {other:?}"),
+        }
+        match repair_json(r"[C:\a.txt C:\b.txt]") {
+            RepairOutcome::Repaired { repairs, .. } => {
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+                assert!(
+                    repairs
+                        .iter()
+                        .any(|item| item.detail.contains("bare paths")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("comma note -> {other:?}"),
+        }
+        match repair_json(r"[C:\a.txt, C:\b.txt]") {
+            RepairOutcome::Repaired { repairs, .. } => {
+                assert!(
+                    repairs
+                        .iter()
+                        .all(|item| !item.detail.contains("missing commas")),
+                    "{repairs:?}"
+                );
+            }
+            other => panic!("comma already present -> {other:?}"),
+        }
     }
 
     #[test]
