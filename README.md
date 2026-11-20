@@ -56,7 +56,7 @@ cargo run --example repair
 | `Unfixable` | Argmend could not produce one JSON value. |
 | `Ambiguous` | More than one repair was possible, so none was chosen. |
 
-A Windows path whose backslash was a JSON escape is a `Repaired` result. An unquoted path keeps a `]` that closes a `[` in that path, as in `a[1].txt`. A `]` that does not close one still ends an array. A `{` in that path, and the `}` that closes it, stay in the filename, as in `{notes}.txt`. A `}` that does not close one still ends the object. Two unquoted paths with no comma between them become two strings. A `#` glued to the next filename character stays in the path, so `report #2.txt` is one value. `# note` after a space is still a comment.
+A Windows path whose backslash was a JSON escape is a `Repaired` result. An unquoted path keeps a `]` that closes a `[` in that path, as in `a[1].txt`. A `]` that does not close one still ends an array. A `{` in that path, and the `}` that closes it, stay in the filename, as in `{notes}.txt`. A `}` that does not close one still ends the object. Two unquoted paths with no comma between them become two strings. A comma stays in the filename until that name has an extension, so `a,b.txt` and `Report, final.txt` are one path. A comma after `.txt` still separates the next value. A semicolon between filename characters stays, so `a;b.txt` is one path. A `#` glued to the next filename character stays in the path, so `report #2.txt` is one value. `# note` after a space is still a comment.
 
 ### Numbers and paths
 
