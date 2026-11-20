@@ -1797,9 +1797,20 @@ fn preceded_by_ident(chars: &[char], index: usize) -> bool {
 
 fn consume_unquoted_path(chars: &[char], start: usize) -> usize {
     let mut index = start;
+    let mut brackets = 0usize;
     loop {
         while index < chars.len() && is_unquoted_path_char(chars[index]) {
+            if chars[index] == '[' {
+                brackets += 1;
+            }
             index += 1;
+        }
+        // `a[1].txt` keeps the closer. A `]` with no open bracket still
+        // ends an array.
+        if index < chars.len() && chars[index] == ']' && brackets > 0 {
+            brackets -= 1;
+            index += 1;
+            continue;
         }
         if index < chars.len() && chars[index].is_whitespace() {
             let mut next = index + 1;

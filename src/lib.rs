@@ -3408,6 +3408,11 @@ mod tests {
             "c:\\Program Files\\a.rs",
         );
         one_path(
+            r"{path: C:\Users\sebta\a[1].txt}",
+            "path",
+            "C:\\Users\\sebta\\a[1].txt",
+        );
+        one_path(
             "{path: C:/Users/sebta/a.rs, line: 3}",
             "path",
             "C:/Users/sebta/a.rs",
@@ -3430,6 +3435,31 @@ mod tests {
             }
             other => panic!("array -> {other:?}"),
         }
+        match repair_json(r"[C:\temp\a.txt]") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value[0], "C:\\temp\\a.txt"),
+            other => panic!("array closer -> {other:?}"),
+        }
+        match repair_json(r"[C:\temp\a[1].txt]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value.as_array().map(Vec::len), Some(1), "{value}");
+                assert_eq!(value[0], "C:\\temp\\a[1].txt");
+            }
+            other => panic!("brackets inside a path -> {other:?}"),
+        }
+        match repair_json(r"{files: [C:\temp\a.txt, D:\b.txt]}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["files"][0], "C:\\temp\\a.txt");
+                assert_eq!(value["files"][1], "D:\\b.txt");
+            }
+            other => panic!("two paths -> {other:?}"),
+        }
+        assert!(
+            matches!(
+                repair_json(r"{path: C:\temp\a].txt}"),
+                RepairOutcome::Unfixable(_)
+            ),
+            "a ] with no open bracket still ends the value"
+        );
         one_path(
             r"{path: \\server\share\a.rs}",
             "path",
