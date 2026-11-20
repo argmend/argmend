@@ -33,7 +33,8 @@ use super::{RepairError, Rewrite, RewriteKind};
 /// 14. Replace `=` and `=>` between a key and a value.
 /// 15. Quote an unquoted drive path or `scheme://` value. A `{` that
 ///     opens inside that path, and the `}` that closes it, stay in the
-///     path. A second path after a finished one is quoted too.
+///     path. A comma stays in the name until that name has an extension.
+///     A second path after a finished one is quoted too.
 /// 16. Insert a missing colon. A later word in a bare phrase is not a new key.
 ///     An unescaped quote after a finished string value is ambiguous.
 /// 17. Quote bare keys.
@@ -1832,6 +1833,22 @@ fn consume_unquoted_path(chars: &[char], start: usize) -> usize {
             index += 1;
             continue;
         }
+        // `a;b.txt` keeps the semicolon. `C:\a.txt;` before `}` does not,
+        // so a trailing `;` after the object still drops.
+        if index < chars.len() && chars[index] == ';' && semicolon_continues_path(chars, index) {
+            index += 1;
+            continue;
+        }
+        // `a,b.txt` and `Report, final.txt` have no extension yet, so the
+        // comma is part of the name. `a.txt, hello` already has one, and
+        // the comma still separates the next value.
+        if index < chars.len()
+            && chars[index] == ','
+            && let Some(next) = comma_continues_path(chars, start, index)
+        {
+            index = next;
+            continue;
+        }
         if index < chars.len() && chars[index].is_whitespace() {
             let mut next = index + 1;
             while next < chars.len() && chars[next].is_whitespace() {
@@ -1845,6 +1862,88 @@ fn consume_unquoted_path(chars: &[char], start: usize) -> usize {
         break;
     }
     index
+}
+
+fn segment_has_extension(chars: &[char], start: usize, end: usize) -> bool {
+    let mut seg = start;
+    let mut index = start;
+    while index < end {
+        if chars[index] == '\\' || chars[index] == '/' {
+            seg = index + 1;
+        }
+        index += 1;
+    }
+    let mut saw_dot = false;
+    for ch in &chars[seg..end] {
+        if *ch == '.' {
+            saw_dot = true;
+        } else if saw_dot && ch.is_alphanumeric() {
+            return true;
+        } else if saw_dot {
+            saw_dot = false;
+        }
+    }
+    false
+}
+
+/// Where the filename continues after this comma, if the comma is not a
+/// JSON separator. `None` leaves the comma in place.
+fn comma_continues_path(chars: &[char], path_start: usize, comma: usize) -> Option<usize> {
+    if segment_has_extension(chars, path_start, comma) {
+        return None;
+    }
+    let mut next = comma + 1;
+    while next < chars.len() && chars[next].is_whitespace() {
+        next += 1;
+    }
+    if next >= chars.len() || chars[next].is_ascii_digit() {
+        return None;
+    }
+    if chars.get(next) == Some(&'\\') && chars.get(next + 1) == Some(&'\\') {
+        return None;
+    }
+    if starts_bare_word(chars[next]) {
+        let end = bare_word_end(chars, next);
+        let mut after = end;
+        while after < chars.len() && chars[after].is_ascii_whitespace() {
+            after += 1;
+        }
+        if after < chars.len() && chars[after] == ':' {
+            return None;
+        }
+    }
+    let mut end = next;
+    while end < chars.len() && is_unquoted_path_char(chars[end]) {
+        end += 1;
+    }
+    if chars[next..end].contains(&'.') {
+        return Some(next);
+    }
+    // `a,b,c.txt`: `b` has no dot, and the next comma still leads to one.
+    if end < chars.len()
+        && chars[end] == ','
+        && comma_continues_path(chars, path_start, end).is_some()
+    {
+        return Some(next);
+    }
+    None
+}
+
+fn semicolon_continues_path(chars: &[char], semi: usize) -> bool {
+    let Some(next) = chars.get(semi + 1).copied() else {
+        return false;
+    };
+    if !is_unquoted_path_char(next) {
+        return false;
+    }
+    // `a;C:\b` is the next path. `a;b.txt` is one filename.
+    if next.is_ascii_alphabetic()
+        && chars.get(semi + 2) == Some(&':')
+        && matches!(chars.get(semi + 3), Some('\\' | '/'))
+    {
+        return false;
+    }
+    true
 }
 
 fn unquoted_path_continues(chars: &[char], index: usize) -> bool {

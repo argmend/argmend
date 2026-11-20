@@ -197,6 +197,8 @@ pub enum RepairError {
 /// A JSON escape after a one-letter label, such as `Q:\n` or `Q:\n\n`, stays that escape.
 /// An unquoted drive path is one string. A `{...}` inside that path
 /// stays there, and a missing comma between two of those paths is inserted.
+/// A comma inside the filename stays when that name has no extension yet.
+/// A semicolon between filename characters stays.
 /// A sentence after one object or array is removed, as in `{"a": 1}`
 /// followed by `Done.`. The same sentence before the value, as in
 /// `Here is the call: {"a": 1}`, stays unfixable. A markdown fence that
@@ -3744,6 +3746,71 @@ mod tests {
                 );
             }
             other => panic!("comma already present -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unquoted_path_keeps_a_comma_or_semicolon_inside_the_filename() {
+        fn one_path(raw: &str, key: &str, expected: &str) {
+            match repair_json(raw) {
+                RepairOutcome::Repaired { value, .. } => {
+                    assert_eq!(value[key], expected, "{raw} {value}");
+                }
+                other => panic!("{raw:?} -> {other:?}"),
+            }
+        }
+
+        one_path(r"{path: C:\temp\a,b.txt}", "path", "C:\\temp\\a,b.txt");
+        one_path(r"{path: C:\temp\a,b,c.txt}", "path", "C:\\temp\\a,b,c.txt");
+        one_path(
+            r"{path: C:\temp\Report, final.txt}",
+            "path",
+            "C:\\temp\\Report, final.txt",
+        );
+        one_path(
+            r"{path: C:\temp.old\file,name.txt}",
+            "path",
+            "C:\\temp.old\\file,name.txt",
+        );
+        one_path(r"{path: C:\temp\a;b.txt}", "path", "C:\\temp\\a;b.txt");
+        match repair_json(r"{path: C:\temp\a,b.txt, line: 2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\temp\\a,b.txt");
+                assert_eq!(value["line"], 2);
+            }
+            other => panic!("comma name then a key -> {other:?}"),
+        }
+        match repair_json(r"[C:\a.txt,hello]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value[0], "C:\\a.txt");
+                assert_eq!(value[1], "hello");
+            }
+            other => panic!("comma after an extension -> {other:?}"),
+        }
+        match repair_json(r"[C:\a.txt, hello]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value[0], "C:\\a.txt");
+                assert_eq!(value[1], "hello");
+            }
+            other => panic!("spaced comma after an extension -> {other:?}"),
+        }
+        match repair_json(r"[C:\a.txt, C:\b.txt]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value[0], "C:\\a.txt");
+                assert_eq!(value[1], "C:\\b.txt");
+            }
+            other => panic!("comma between two paths -> {other:?}"),
+        }
+        match repair_json(r"{path: C:\a.txt};") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["path"], "C:\\a.txt"),
+            other => panic!("trailing semicolon -> {other:?}"),
+        }
+        match repair_json(r"[C:\a, 12]") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value[0], "C:\\a");
+                assert_eq!(value[1], 12);
+            }
+            other => panic!("comma before a number -> {other:?}"),
         }
     }
 
