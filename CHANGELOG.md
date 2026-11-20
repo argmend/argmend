@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.1](https://github.com/argmend/argmend/compare/v0.4.0...v0.4.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* keep a closing bracket inside an unquoted Windows path ([#226](https://github.com/argmend/argmend/issues/226)) ([cd93206](https://github.com/argmend/argmend/commit/cd932061c1a368dac2818b54919b13cedf42989b))
+* keep a hash inside an unquoted Windows path ([#227](https://github.com/argmend/argmend/issues/227)) ([0a3ef12](https://github.com/argmend/argmend/commit/0a3ef12984042a7ddb729e40fe11de5df1aad5e3))
+* use the parameter schema when required sits beside it ([#223](https://github.com/argmend/argmend/issues/223)) ([c96842a](https://github.com/argmend/argmend/commit/c96842aa4c8ef7ff3de6aaa6db9e32759802bb4a)), closes [#220](https://github.com/argmend/argmend/issues/220)
+
 ## [0.4.0](https://github.com/argmend/argmend/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 
