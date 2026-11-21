@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.2](https://github.com/argmend/argmend/compare/v0.4.1...v0.4.2) (2026-11-21)
+
+
+### Bug Fixes
+
+* keep a brace in a Windows path and the next path ([#230](https://github.com/argmend/argmend/issues/230)) ([3c60584](https://github.com/argmend/argmend/commit/3c6058418b473162b8bb42ae72a9b2d864034b88)), closes [#228](https://github.com/argmend/argmend/issues/228) [#229](https://github.com/argmend/argmend/issues/229)
+* keep a comma or semicolon inside an unquoted filename ([#232](https://github.com/argmend/argmend/issues/232)) ([7c1858b](https://github.com/argmend/argmend/commit/7c1858b1180094696e36adbb6c2eedbeb3bf5e48))
+* keep path text that repair passes were changing ([#233](https://github.com/argmend/argmend/issues/233)) ([c61a3f9](https://github.com/argmend/argmend/commit/c61a3f92ebc9118eb2263aac3e8211f71b49ab8e))
+
 ## [0.4.1](https://github.com/argmend/argmend/compare/v0.4.0...v0.4.1) (2026-11-20)
 
 
