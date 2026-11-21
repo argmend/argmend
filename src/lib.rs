@@ -200,7 +200,8 @@ pub enum RepairError {
 /// A comma inside the filename stays when that name has no extension yet.
 /// A semicolon between filename characters stays.
 /// `//` or `/*` after a port or a path digit stays in that path.
-/// `{n: 12 // note}` is still a comment. `0x10` and `1_000` inside an
+/// `{n: 12 // note}` is still a comment. `//` and `/*` inside a
+/// triple-quoted string stay. `0x10` and `1_000` inside an
 /// unquoted path stay. A bare `0x10` still becomes 16.
 /// A sentence after one object or array is removed, as in `{"a": 1}`
 /// followed by `Done.`. A hostname or a filename is not that sentence.
@@ -3933,6 +3934,58 @@ mod tests {
         match repair_json(r#"{a: """keep 0x10"""}"#) {
             RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "keep 0x10"),
             other => panic!("triple quote without an inner quote -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_marks_inside_triple_quotes_stay() {
+        match repair_json(r#"{a: """say "hello // world" today"""}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "say \"hello // world\" today");
+            }
+            other => panic!("line mark inside triple quotes -> {other:?}"),
+        }
+        match repair_json(r#"{a: """call("/*keep*/")"""}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "call(\"/*keep*/\")");
+            }
+            other => panic!("block mark inside triple quotes -> {other:?}"),
+        }
+        match repair_json(r#"{a: """note "see # tag" today"""}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "note \"see # tag\" today");
+            }
+            other => panic!("hash inside triple quotes -> {other:?}"),
+        }
+        match repair_json(r#"{n: 1 // """no""", m: 2}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["n"], 1);
+                assert!(value.get("m").is_none(), "{value}");
+                assert_eq!(value.as_object().expect("object").len(), 1);
+            }
+            other => panic!("triple quote inside a line comment -> {other:?}"),
+        }
+        match repair_json("{n: 12 // keep, m: 3}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["n"], 12);
+                assert!(value.get("m").is_none(), "{value}");
+                assert_eq!(value.as_object().expect("object").len(), 1);
+            }
+            other => panic!("same-line comment drops the next field -> {other:?}"),
+        }
+        match repair_json("{n: 12 // keep}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["n"], 12);
+                assert!(!value.to_string().contains("keep"), "{value}");
+            }
+            other => panic!("line comment still drops -> {other:?}"),
+        }
+        match repair_json("{u: http://example.com/a, n: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["u"], "http://example.com/a");
+                assert_eq!(value["n"], 1);
+            }
+            other => panic!("url outside a string -> {other:?}"),
         }
     }
 
