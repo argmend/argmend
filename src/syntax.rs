@@ -18,8 +18,9 @@ use super::{RepairError, Rewrite, RewriteKind};
 /// 1. Strip control characters other than newline, tab, and carriage return.
 /// 2. Strip `//`, `#`, and closed `/* */` comments that begin at a token
 ///    boundary. An unclosed `/*` stays. A mark glued to a bare word stays.
-///    A `//` or `/*` inside an unquoted path or URL stays. `#2` inside a
-///    path stays. `# note` after a space is still a comment.
+///    A `//` or `/*` inside an unquoted path or URL stays. A `//`, `/*`,
+///    or `#` inside `"""` stays. `#2` inside a path stays. `# note` after
+///    a space is still a comment.
 /// 3. Replace single quotes with double quotes.
 /// 4. Replace curly double quotes that wrap a token.
 /// 5. Keep a Windows-path backslash, including one inside a sentence, and
@@ -3206,6 +3207,8 @@ pub(crate) fn remove_trailing_commas(s: &str) -> String {
 /// Strip `//` and `#` line comments and `/* ... */` block comments.
 ///
 /// Double-quoted strings are copied until the next unescaped `"`.
+/// A `"""` span is copied through its closer, so a `//`, `/*`, or `#`
+/// inside it stays. No closer copies the rest unchanged.
 /// Inside a single-quoted string, a `'` followed by a letter or
 /// digit stays in the value. Any other `'` closes the string, and an
 /// unclosed string does not gain a closer. Quote repair runs after this
@@ -3223,6 +3226,25 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
 
     while i < len {
         match chars[i] {
+            '"' if i + 2 < len && chars[i + 1] == '"' && chars[i + 2] == '"' => {
+                // `"""` is one span. Comment marks inside it stay.
+                // `fix_triple_quotes` rewrites the span later.
+                let mut end = i + 3;
+                let mut closed = false;
+                while end + 2 < len {
+                    if chars[end] == '"' && chars[end + 1] == '"' && chars[end + 2] == '"' {
+                        end += 3;
+                        closed = true;
+                        break;
+                    }
+                    end += 1;
+                }
+                let stop = if closed { end } else { len };
+                for ch in &chars[i..stop] {
+                    out.push(*ch);
+                }
+                i = stop;
+            }
             '"' => {
                 out.push('"');
                 i += 1;
