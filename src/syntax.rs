@@ -18,17 +18,20 @@ use super::{RepairError, Rewrite, RewriteKind};
 /// 1. Strip control characters other than newline, tab, and carriage return.
 /// 2. Strip `//`, `#`, and closed `/* */` comments that begin at a token
 ///    boundary. An unclosed `/*` stays. A mark glued to a bare word stays.
+///    A `//` or `/*` inside an unquoted path or URL stays. `#2` inside a
+///    path stays. `# note` after a space is still a comment.
 /// 3. Replace single quotes with double quotes.
 /// 4. Replace curly double quotes that wrap a token.
 /// 5. Keep a Windows-path backslash, including one inside a sentence, and
 ///    keep a backslash JSON does not treat as an escape.
 /// 6. Escape raw controls inside strings.
 /// 7. Strip a unary `+` before a number.
-/// 8. Strip `_` between digits in a number, not inside a name.
-/// 9. Replace hexadecimal numbers.
-/// 10. Replace binary and octal numbers.
-/// 11. Fill a trailing decimal dot on a number (`1.` becomes `1.0`).
-/// 12. Replace Python triple quotes.
+/// 8. Replace Python triple quotes, before a number rewrite can see them.
+/// 9. Strip `_` between digits in a number, not inside a name or a path.
+/// 10. Replace hexadecimal numbers outside a string or an unquoted path.
+/// 11. Replace binary and octal numbers outside a string or an unquoted path.
+/// 12. Fill a trailing decimal dot on a number (`1.` becomes `1.0`), not
+///     inside an unquoted path.
 /// 13. Replace unicode whitespace between tokens.
 /// 14. Replace `=` and `=>` between a key and a value.
 /// 15. Quote an unquoted drive path or `scheme://` value. A `{` that
@@ -108,6 +111,14 @@ pub(crate) fn apply_stages(raw: &str, path_backslashes: bool) -> Result<Staged, 
         text = cleaned;
     }
 
+    let cleaned = fix_triple_quotes(&text);
+    if cleaned != text {
+        repairs.push(syntax_note(
+            "replaced Python triple-quotes with JSON strings",
+        ));
+        text = cleaned;
+    }
+
     let cleaned = strip_numeric_underscores(&text);
     if cleaned != text {
         repairs.push(syntax_note("stripped underscores in numbers"));
@@ -129,14 +140,6 @@ pub(crate) fn apply_stages(raw: &str, path_backslashes: bool) -> Result<Staged, 
     let cleaned = fill_trailing_decimal_dot(&text);
     if cleaned != text {
         repairs.push(syntax_note("filled a trailing decimal dot"));
-        text = cleaned;
-    }
-
-    let cleaned = fix_triple_quotes(&text);
-    if cleaned != text {
-        repairs.push(syntax_note(
-            "replaced Python triple-quotes with JSON strings",
-        ));
         text = cleaned;
     }
 
@@ -1886,47 +1889,47 @@ fn segment_has_extension(chars: &[char], start: usize, end: usize) -> bool {
     false
 }
 
-/// Where the filename continues after this comma, if the comma is not a
-/// JSON separator. `None` leaves the comma in place.
-fn comma_continues_path(chars: &[char], path_start: usize, comma: usize) -> Option<usize> {
+/// End of the filename after this comma, when the comma is not a JSON
+/// separator. One walk covers `a,b,c.txt`. `None` leaves the comma in place.
+fn comma_continues_path(chars: &[char], path_start: usize, mut comma: usize) -> Option<usize> {
     if segment_has_extension(chars, path_start, comma) {
         return None;
     }
-    let mut next = comma + 1;
-    while next < chars.len() && chars[next].is_whitespace() {
-        next += 1;
-    }
-    if next >= chars.len() || chars[next].is_ascii_digit() {
-        return None;
-    }
-    if chars.get(next) == Some(&'\\') && chars.get(next + 1) == Some(&'\\') {
-        return None;
-    }
-    if starts_bare_word(chars[next]) {
-        let end = bare_word_end(chars, next);
-        let mut after = end;
-        while after < chars.len() && chars[after].is_ascii_whitespace() {
-            after += 1;
+    loop {
+        let mut next = comma + 1;
+        while next < chars.len() && chars[next].is_whitespace() {
+            next += 1;
         }
-        if after < chars.len() && chars[after] == ':' {
+        if next >= chars.len() || chars[next].is_ascii_digit() {
             return None;
         }
+        if chars.get(next) == Some(&'\\') && chars.get(next + 1) == Some(&'\\') {
+            return None;
+        }
+        if starts_bare_word(chars[next]) {
+            let word_end = bare_word_end(chars, next);
+            let mut after = word_end;
+            while after < chars.len() && chars[after].is_ascii_whitespace() {
+                after += 1;
+            }
+            if after < chars.len() && chars[after] == ':' {
+                return None;
+            }
+        }
+        let mut end = next;
+        while end < chars.len() && is_unquoted_path_char(chars[end]) {
+            end += 1;
+        }
+        if chars[next..end].contains(&'.') {
+            return Some(end);
+        }
+        // `a,b,c.txt`: `b` has no dot. Keep looking for a later dotted name.
+        if end < chars.len() && chars[end] == ',' {
+            comma = end;
+            continue;
+        }
+        return None;
     }
-    let mut end = next;
-    while end < chars.len() && is_unquoted_path_char(chars[end]) {
-        end += 1;
-    }
-    if chars[next..end].contains(&'.') {
-        return Some(next);
-    }
-    // `a,b,c.txt`: `b` has no dot, and the next comma still leads to one.
-    if end < chars.len()
-        && chars[end] == ','
-        && comma_continues_path(chars, path_start, end).is_some()
-    {
-        return Some(next);
-    }
-    None
 }
 
 fn semicolon_continues_path(chars: &[char], semi: usize) -> bool {
@@ -1979,6 +1982,22 @@ fn consume_url(chars: &[char], start: usize) -> usize {
         index += 1;
     }
     index
+}
+
+/// End of the drive, UNC, or `scheme://` token that contains `index`.
+/// `{n: 0x10}` is not a path. `C:\dir\0x10` and `http://host/0x10` are.
+fn path_token_end_from(chars: &[char], index: usize) -> Option<usize> {
+    if index >= chars.len() {
+        return None;
+    }
+    let mut start = index;
+    while start > 0 && is_unquoted_path_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let end = drive_path_end(chars, start)
+        .or_else(|| unc_path_end(chars, start))
+        .or_else(|| url_path_end(chars, start))?;
+    (end > index).then_some(end)
 }
 
 fn is_unquoted_path_char(ch: char) -> bool {
@@ -2180,7 +2199,11 @@ pub(crate) fn fill_trailing_decimal_dot(s: &str) -> String {
         }
         let prev_digit = index > 0 && chars[index - 1].is_ascii_digit();
         let at_end = index + 1 == len || is_json_value_end(chars[index + 1]);
-        if chars[index] == '.' && prev_digit && at_end && digits_belong_to_number(&chars, index - 1)
+        if chars[index] == '.'
+            && prev_digit
+            && at_end
+            && digits_belong_to_number(&chars, index - 1)
+            && path_token_end_from(&chars, index).is_none()
         {
             out.push('.');
             out.push('0');
@@ -2232,6 +2255,7 @@ pub(crate) fn replace_hex_numbers(s: &str) -> String {
             && chars[index] == '0'
             && index + 1 < len
             && (chars[index + 1] == 'x' || chars[index + 1] == 'X')
+            && path_token_end_from(&chars, index).is_none()
         {
             let mut end = index + 2;
             while end < len && chars[end].is_ascii_hexdigit() {
@@ -2293,7 +2317,11 @@ pub(crate) fn replace_binary_and_octal_numbers(s: &str) -> String {
             continue;
         }
         let boundary = index == 0 || !is_number_prefix(chars[index - 1]);
-        let radix = if boundary && chars[index] == '0' && index + 1 < len {
+        let radix = if boundary
+            && chars[index] == '0'
+            && index + 1 < len
+            && path_token_end_from(&chars, index).is_none()
+        {
             match chars[index + 1] {
                 'b' | 'B' => Some(2),
                 'o' | 'O' => Some(8),
@@ -2423,14 +2451,13 @@ fn is_numeric_token(token: &[char]) -> bool {
 /// colon, a quote, a finished number, or a finished literal counts. A mark
 /// glued to a bare word (`a//b`, `x#y`) stays in that word.
 /// `#2.txt` after a space is still the Windows path. `# note` is a comment.
-fn hash_is_inside_unquoted_path(chars: &[char], hash: usize) -> bool {
-    let Some(next) = chars.get(hash + 1) else {
-        return false;
-    };
+/// End of the unquoted path that contains this `#`. `None` means the mark
+/// can start a comment. One call covers every later `#` in that path.
+fn hash_path_end(chars: &[char], hash: usize) -> Option<usize> {
+    let next = chars.get(hash + 1)?;
     // `# note` is a comment. `#2` and `{report #2}` stay in the path.
-    // A closer that the path does not consume still ends the value.
     if next.is_whitespace() {
-        return false;
+        return None;
     }
     let mut index = 0;
     while index < hash {
@@ -2441,27 +2468,24 @@ fn hash_is_inside_unquoted_path(chars: &[char], hash: usize) -> bool {
             }
             if value <= hash
                 && let Some(end) = unquoted_path_end(chars, value)
-                && path_covers_hash(chars, end, hash)
+                && let Some(end) = path_cover_end(chars, end, hash)
             {
-                return true;
+                return Some(end);
             }
         }
         index += 1;
     }
-    false
+    None
 }
 
 /// The hash is inside this path, or inside a later path that is only a
 /// whitespace gap away (`[C:\a #1.txt C:\b #2.txt]`).
-fn path_covers_hash(chars: &[char], mut end: usize, hash: usize) -> bool {
+fn path_cover_end(chars: &[char], mut end: usize, hash: usize) -> Option<usize> {
     loop {
         if end > hash + 1 {
-            return true;
+            return Some(end);
         }
-        let Some(next_end) = path_after(chars, end) else {
-            return false;
-        };
-        end = next_end;
+        end = path_after(chars, end)?;
     }
 }
 
@@ -2562,7 +2586,7 @@ pub(crate) fn strip_numeric_underscores(s: &str) -> String {
             }
             continue;
         }
-        if underscore_in_number(&chars, i) {
+        if underscore_in_number(&chars, i) && path_token_end_from(&chars, i).is_none() {
             i += 1;
             continue;
         }
@@ -3267,9 +3291,11 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
                 }
             }
             '#' if comment_can_start(&chars, i) => {
-                if hash_is_inside_unquoted_path(&chars, i) {
-                    out.push('#');
-                    i += 1;
+                if let Some(end) = hash_path_end(&chars, i) {
+                    for ch in &chars[i..end] {
+                        out.push(*ch);
+                    }
+                    i = end;
                     continue;
                 }
                 i += 1;
@@ -3279,12 +3305,22 @@ pub(crate) fn strip_json_comments(s: &str) -> String {
             }
             '/' if i + 1 < len => {
                 if chars[i + 1] == '/' && comment_can_start(&chars, i) {
+                    if path_token_end_from(&chars, i).is_some() {
+                        out.push(chars[i]);
+                        i += 1;
+                        continue;
+                    }
                     // Line comment: skip until newline.
                     i += 2;
                     while i < len && chars[i] != '\n' {
                         i += 1;
                     }
                 } else if chars[i + 1] == '*' && comment_can_start(&chars, i) {
+                    if path_token_end_from(&chars, i).is_some() {
+                        out.push(chars[i]);
+                        i += 1;
+                        continue;
+                    }
                     // A closed block comment is removed. An unclosed one is
                     // kept: dropping the tail and then inventing `}` would
                     // change the object.

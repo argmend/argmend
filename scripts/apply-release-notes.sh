@@ -61,17 +61,25 @@ if [ -n "${NOTES_FILE}" ] && [ -f "${NOTES_FILE}" ]; then
   source_label="file:${NOTES_FILE}"
 elif [ -n "${GH_TOKEN:-}" ]; then
   echo "PLAN: fetch RELEASE_NOTES.md from ${branch}"
+  notes_err="$(mktemp)"
   if gh api "repos/${REPO}/contents/RELEASE_NOTES.md?ref=${branch}" \
-    -H "Accept: application/vnd.github.raw" >"${tmp}"; then
+    -H "Accept: application/vnd.github.raw" >"${tmp}" 2>"${notes_err}"; then
+    rm -f "${notes_err}"
     if [ -s "${tmp}" ]; then
       loaded_from_branch=1
       source_label="branch:${branch}"
     else
       echo "PLAN: empty notes on ${branch}"
     fi
-  else
+  elif grep -Eq 'HTTP 404|Not Found' "${notes_err}"; then
+    rm -f "${notes_err}"
     : >"${tmp}"
     echo "PLAN: no notes branch ${branch}"
+  else
+    cat "${notes_err}" >&2
+    rm -f "${notes_err}"
+    echo "FAIL: could not read notes branch ${branch}" >&2
+    exit 1
   fi
 fi
 

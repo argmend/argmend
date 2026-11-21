@@ -199,8 +199,12 @@ pub enum RepairError {
 /// stays there, and a missing comma between two of those paths is inserted.
 /// A comma inside the filename stays when that name has no extension yet.
 /// A semicolon between filename characters stays.
+/// `//` or `/*` after a port or a path digit stays in that path.
+/// `{n: 12 // note}` is still a comment. `0x10` and `1_000` inside an
+/// unquoted path stay. A bare `0x10` still becomes 16.
 /// A sentence after one object or array is removed, as in `{"a": 1}`
-/// followed by `Done.`. The same sentence before the value, as in
+/// followed by `Done.`. A hostname or a filename is not that sentence.
+/// The same sentence before the value, as in
 /// `Here is the call: {"a": 1}`, stays unfixable. A markdown fence that
 /// starts the input is unwrapped. A word before that fence stays unfixable.
 /// A `<tool_call>` tag around the value stays unfixable. A second JSON value
@@ -248,9 +252,18 @@ pub struct ArgumentPreview {
 /// `[1, 2, 3]` with `complete: false`. That partial value must not be
 /// passed to a tool. An unclosed string has no value and does not panic.
 /// JSON whitespace still counts as complete. A no-break space around
-/// the value does not.
+/// the value does not. Two different values for one key are not complete.
 pub fn preview_args(raw: &str) -> ArgumentPreview {
     if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        if matches!(
+            syntax::duplicate_key_notes(raw),
+            Err(RepairError::Ambiguous(_))
+        ) {
+            return ArgumentPreview {
+                value: None,
+                complete: false,
+            };
+        }
         return ArgumentPreview {
             value: Some(value),
             complete: true,
@@ -258,6 +271,15 @@ pub fn preview_args(raw: &str) -> ArgumentPreview {
     }
     // `trim` also drops U+00A0. That text is not JSON yet.
     if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+        if matches!(
+            syntax::duplicate_key_notes(raw.trim()),
+            Err(RepairError::Ambiguous(_))
+        ) {
+            return ArgumentPreview {
+                value: None,
+                complete: false,
+            };
+        }
         return ArgumentPreview {
             value: Some(value),
             complete: false,
@@ -3811,6 +3833,174 @@ mod tests {
                 assert_eq!(value[1], 12);
             }
             other => panic!("comma before a number -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn many_commas_in_a_filename_stay_one_path() {
+        let body = "a,".repeat(2_000);
+        let raw = format!(r"{{path: C:\temp\{body}z.txt}}");
+        let started = std::time::Instant::now();
+        match repair_json(&raw) {
+            RepairOutcome::Repaired { value, .. } => {
+                let path = value["path"].as_str().expect("path");
+                assert!(path.ends_with("z.txt"), "{path}");
+                assert!(path.contains("a,a,a"), "{path}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_millis() < 500, "comma path took {elapsed:?}");
+    }
+
+    #[test]
+    fn comment_after_a_port_or_path_digit_stays_in_the_value() {
+        match repair_json("{url: http://example.com:8080//api, n: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["url"], "http://example.com:8080//api");
+                assert_eq!(value["n"], 1);
+            }
+            other => panic!("port then two slashes -> {other:?}"),
+        }
+        match repair_json("{url: http://example.com:8080/api, n: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["url"], "http://example.com:8080/api");
+                assert_eq!(value["n"], 1);
+            }
+            other => panic!("single slash after a port -> {other:?}"),
+        }
+        match repair_json(r"{p: C:\2/*x*/y.txt}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["p"], "C:\\2/*x*/y.txt");
+            }
+            other => panic!("block mark in a path -> {other:?}"),
+        }
+        match repair_json("{n: 12 // keep\n, m: 3}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["n"], 12);
+                assert_eq!(value["m"], 3);
+                assert_eq!(value.as_object().expect("object").len(), 2);
+            }
+            other => panic!("comment after a number -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn number_spellings_inside_a_path_stay_text() {
+        match repair_json(r"{p: C:\dir\0x10\a.txt}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["p"], "C:\\dir\\0x10\\a.txt");
+            }
+            other => panic!("hex path -> {other:?}"),
+        }
+        match repair_json("{u: http://example.com/a/0b1010, n: 1}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["u"], "http://example.com/a/0b1010");
+                assert_eq!(value["n"], 1);
+            }
+            other => panic!("binary url -> {other:?}"),
+        }
+        match repair_json(r"{p: C:\dir\0o10\a.txt}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["p"], "C:\\dir\\0o10\\a.txt");
+            }
+            other => panic!("octal path -> {other:?}"),
+        }
+        match repair_json(r"{p: C:\1_2}") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["p"], "C:\\1_2"),
+            other => panic!("underscore path -> {other:?}"),
+        }
+        match repair_json("{u: http://example.com/1.}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["u"], "http://example.com/1.");
+            }
+            other => panic!("trailing dot in a url -> {other:?}"),
+        }
+        match repair_json("{n: 0x10, m: 1_000, k: 1.}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["n"], 16);
+                assert_eq!(value["m"], 1000);
+                assert_eq!(value["k"], 1.0);
+            }
+            other => panic!("bare numbers still rewrite -> {other:?}"),
+        }
+        match repair_json(r#"{a: """price is "0x10" today"""}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "price is \"0x10\" today");
+            }
+            other => panic!("triple quote hex -> {other:?}"),
+        }
+        match repair_json(r#"{a: """keep 0x10"""}"#) {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], "keep 0x10"),
+            other => panic!("triple quote without an inner quote -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hostname_or_filename_after_json_is_not_prose() {
+        assert!(matches!(
+            repair_json(r#"{"a":1} www.example.com"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        assert!(matches!(
+            repair_json(r#"{"a":1} file.txt"#),
+            RepairOutcome::Unfixable(_)
+        ));
+        match repair_json("{\"a\": 1}\nThanks") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["a"], 1),
+            other => panic!("Thanks is still prose -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preview_does_not_pick_a_disagreeing_duplicate_key() {
+        let preview = preview_args(r#"{"a":1,"a":2}"#);
+        assert!(!preview.complete);
+        assert!(preview.value.is_none());
+        assert!(matches!(
+            repair_json(r#"{"a":1,"a":2}"#),
+            RepairOutcome::Ambiguous(_)
+        ));
+        let same = preview_args(r#"{"a":1,"a":1}"#);
+        assert!(same.complete, "{same:?}");
+        assert_eq!(same.value, Some(json!({"a": 1})));
+    }
+
+    #[test]
+    fn xml_code_parameter_keeps_the_first_line_indent() {
+        let raw = "<parameter name=\"code\">\n    x = 1\n    y = 2\n</parameter>";
+        match repair_json(raw) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["code"], "    x = 1\n    y = 2");
+            }
+            other => panic!("indented code -> {other:?}"),
+        }
+        match repair_json("<parameter name=\"file\"> src </parameter>") {
+            RepairOutcome::Repaired { value, .. } => assert_eq!(value["file"], "src"),
+            other => panic!("single line still trims -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn many_hashes_inside_a_path_stay_in_the_name() {
+        let marks = "#2".repeat(4_000);
+        let raw = format!(r"{{path: C:\temp\file{marks}.txt}}");
+        let started = std::time::Instant::now();
+        match repair_json(&raw) {
+            RepairOutcome::Repaired { value, .. } => {
+                let path = value["path"].as_str().expect("path");
+                assert!(path.contains("#2#2"), "{path}");
+                assert!(path.ends_with(".txt"), "{path}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed.as_millis() < 500, "hash path took {elapsed:?}");
+        match repair_json(r"{path: C:\report #2.txt}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\report #2.txt");
+            }
+            other => panic!("hash after a space -> {other:?}"),
         }
     }
 

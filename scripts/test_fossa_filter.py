@@ -26,6 +26,28 @@ class FilterTest(unittest.TestCase):
         ]
         self.assertEqual(fossa.remaining(data), [])
 
+    def test_error_object_is_not_an_empty_list(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump({"error": "failed"}, handle)
+            path = handle.name
+        result = subprocess.run(
+            [sys.executable, str(FILTER), path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("issue list", result.stdout)
+
+    def test_known_crate_without_a_license_id_stays(self):
+        data = [
+            {
+                "revisionId": "cargo+cc$1.2.0",
+                "type": "vulnerability",
+            }
+        ]
+        self.assertEqual(len(fossa.remaining(data)), 1)
+
     def test_unknown_issue_remains(self):
         data = [
             {

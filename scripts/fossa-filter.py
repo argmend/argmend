@@ -25,7 +25,8 @@ def issue_list(data):
         for key in ("issues", "results"):
             if isinstance(data.get(key), list):
                 return data[key]
-    return []
+        raise ValueError("FOSSA JSON has no issue list")
+    raise ValueError("FOSSA JSON was not a list or object")
 
 
 def license_id(issue):
@@ -43,7 +44,7 @@ def is_known(issue):
         return False
     found = license_id(issue)
     if not found:
-        return True
+        return False
     return any(item in found for item in allowed)
 
 
@@ -56,10 +57,10 @@ def main():
     raw = open(path, encoding="utf-8").read()
     try:
         data = json.loads(raw) if raw.strip() else []
-    except json.JSONDecodeError:
-        print("FOSSA JSON was not parseable")
+        left = remaining(data)
+    except (json.JSONDecodeError, ValueError) as err:
+        print(f"FOSSA JSON was not an issue list: {err}")
         sys.exit(1)
-    left = remaining(data)
     if left:
         for issue in left:
             print(
