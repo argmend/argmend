@@ -201,7 +201,7 @@ pub enum RepairError {
 /// A semicolon between filename characters stays.
 /// `//` or `/*` after a port or a path digit stays in that path.
 /// `{n: 12 // note}` is still a comment. `//` and `/*` inside a
-/// triple-quoted string stay. `0x10` and `1_000` inside an
+/// `"""` or `'''` triple-quoted string stay. `0x10` and `1_000` inside an
 /// unquoted path stay. A bare `0x10` still becomes 16.
 /// A sentence after one object or array is removed, as in `{"a": 1}`
 /// followed by `Done.`. A hostname or a filename is not that sentence.
@@ -3986,6 +3986,45 @@ mod tests {
                 assert_eq!(value["n"], 1);
             }
             other => panic!("url outside a string -> {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comment_marks_inside_single_triple_quotes_stay() {
+        match repair_json("{a: '''hello'''}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "hello");
+            }
+            other => panic!("single triple quotes -> {other:?}"),
+        }
+        match repair_json(r#"{a: '''say "hello // world" today'''}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                let text = value["a"].as_str().expect("string");
+                assert_eq!(text, "say \"hello // world\" today");
+                assert!(!text.contains('\\'), "{text}");
+            }
+            other => panic!("line mark inside single triple quotes -> {other:?}"),
+        }
+        match repair_json(r#"{a: '''say "hello // world" today''', b: 2}"#) {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "say \"hello // world\" today");
+                assert_eq!(value["b"], 2);
+            }
+            other => panic!("single triple quotes then a number -> {other:?}"),
+        }
+        match repair_json(r"{a: '''say 'hello // world' today'''}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["a"], "say 'hello // world' today");
+            }
+            other => panic!("slashes inside single triple quotes -> {other:?}"),
+        }
+        match repair_json("{n: 1 // '''no''', m: 2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["n"], 1);
+                assert!(value.get("m").is_none(), "{value}");
+                assert_eq!(value.as_object().expect("object").len(), 1);
+            }
+            other => panic!("single triple quote inside a line comment -> {other:?}"),
         }
     }
 
