@@ -72,7 +72,7 @@ A Windows path whose backslash was a JSON escape is a `Repaired` result. An unqu
 - a word before a markdown fence
 - a `<tool_call>` tag around the value
 
-A fence that starts the input is unwrapped. Text after one object or array is removed: `{"a": 1}` followed by `Done.` is repaired, and the note is `removed trailing prose`.
+A fence that starts the input is unwrapped. Text after one object or array is removed: `{"a": 1}` followed by `Done.` is repaired, and the note is `removed trailing prose`. A hostname or a filename, such as `www.example.com`, stays unfixable. `//` after a port stays in the URL. `0x10` inside an unquoted path stays `0x10`. A bare `0x10` still becomes 16.
 
 `leading_prose` extracts one object or array from a prefix, a word before a fence, or a `<tool_call>` tag. It stays off. `Here {"a":1} {"b":2}` stays unfixable. See [Turning a repair off](#turning-a-repair-off).
 

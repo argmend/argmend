@@ -150,6 +150,57 @@ class ApplyReleaseNotesTests(unittest.TestCase):
                 "DRY_RUN: would delete branch release-note-0.3.0", r.stdout
             )
 
+    def test_missing_notes_branch_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fake_bin = Path(td) / "bin"
+            fake_bin.mkdir()
+            gh = fake_bin / "gh"
+            gh.write_text(
+                "#!/bin/bash\n"
+                "echo 'gh: Not Found (HTTP 404)' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+            env_path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            r = run_script(
+                {
+                    "TAG": "v0.3.0",
+                    "GH_REPO": "argmend/argmend",
+                    "DRY_RUN": "1",
+                    "GH_TOKEN": "test",
+                    "PATH": env_path,
+                }
+            )
+            self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+            self.assertIn("no notes branch", r.stdout)
+            self.assertIn("leaving auto notes", r.stdout)
+
+    def test_notes_fetch_error_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fake_bin = Path(td) / "bin"
+            fake_bin.mkdir()
+            gh = fake_bin / "gh"
+            gh.write_text(
+                "#!/bin/bash\n"
+                "echo 'gh: HTTP 500' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+            env_path = f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+            r = run_script(
+                {
+                    "TAG": "v0.3.0",
+                    "GH_REPO": "argmend/argmend",
+                    "DRY_RUN": "1",
+                    "GH_TOKEN": "test",
+                    "PATH": env_path,
+                }
+            )
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("could not read notes branch", r.stderr)
+
     def test_release_view_fail_skips_edit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)

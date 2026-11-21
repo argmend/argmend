@@ -92,6 +92,15 @@ fn suffix_is_only_prose(tail: &str) -> bool {
     let word_end = rest
         .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
         .unwrap_or(rest.len());
+    // `www.example.com` and `file.txt` are not a sentence. `Done.` still is.
+    if rest.as_bytes().get(word_end) == Some(&b'.')
+        && rest[word_end + 1..]
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_alphanumeric())
+    {
+        return false;
+    }
     let word = &rest[..word_end];
     !matches!(
         word,
@@ -349,7 +358,7 @@ pub(crate) fn xml_parameters(raw: &str) -> Result<Option<(Value, Vec<Rewrite>)>,
                 "xml parameter tag is not closed".into(),
             ));
         };
-        let content = after_name[..content_end].trim();
+        let content = trim_parameter_body(&after_name[..content_end]);
         if object.contains_key(&name) {
             return Err(RepairError::Ambiguous(format!(
                 "xml parameter '{name}' is repeated"
@@ -422,6 +431,27 @@ fn parameter_name(after: &str) -> Result<(String, &str), RepairError> {
         .find('>')
         .ok_or_else(|| RepairError::Unfixable("xml parameter tag is not closed".into()))?;
     Ok((name.to_string(), &after_name[gt + 1..]))
+}
+
+/// Drop the newline a tag usually puts around its body. A single line
+/// still trims. A code block keeps the indent on the first line.
+fn trim_parameter_body(content: &str) -> &str {
+    let mut text = content;
+    if let Some(rest) = text.strip_prefix("\r\n") {
+        text = rest;
+    } else if let Some(rest) = text.strip_prefix('\n') {
+        text = rest;
+    }
+    if let Some(rest) = text.strip_suffix("\r\n") {
+        text = rest;
+    } else if let Some(rest) = text.strip_suffix('\n') {
+        text = rest;
+    }
+    if text.contains('\n') {
+        text
+    } else {
+        text.trim()
+    }
 }
 
 fn parameter_value(content: &str) -> Result<(Value, Vec<Rewrite>), RepairError> {

@@ -140,6 +140,71 @@ class ReportScheduledFailureTests(unittest.TestCase):
         red_issue, _ordered = mod.prepare_matches(unmarked, results=red, today=today)
         self.assertIsNone(red_issue)
 
+        calls: list[list[str]] = []
+
+        def fake_gh(args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args[1:3] == ["label", "list"]:
+                return subprocess.CompletedProcess(
+                    args, 0, json.dumps([{"name": "nightly-failure"}]), ""
+                )
+            if args[1:3] == ["issue", "create"]:
+                return subprocess.CompletedProcess(args, 0, "https://example/9\n", "")
+            if args[1:3] == ["issue", "close"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return subprocess.CompletedProcess(args, 1, "", "unexpected")
+
+        mod._run_gh = fake_gh
+        code = mod.apply_decision(
+            repo="argmend/argmend",
+            prefix="CI red",
+            labels=["nightly-failure"],
+            assignee="SebTardif",
+            run_url="https://example/run/1",
+            decision={
+                "action": "replace",
+                "signature": "test",
+                "first_failed_on": today.isoformat(),
+                "day_count": 1,
+                "run_id": "19",
+            },
+            matches=[{"number": 4}],
+        )
+        self.assertEqual(code, 0)
+        kinds = [call[1:3] for call in calls]
+        self.assertLess(kinds.index(["issue", "create"]), kinds.index(["issue", "close"]))
+
+        calls.clear()
+
+        def fail_create(args: list[str]) -> subprocess.CompletedProcess[str]:
+            calls.append(args)
+            if args[1:3] == ["label", "list"]:
+                return subprocess.CompletedProcess(
+                    args, 0, json.dumps([{"name": "nightly-failure"}]), ""
+                )
+            if args[1:3] == ["issue", "create"]:
+                return subprocess.CompletedProcess(args, 1, "", "create failed")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        mod._run_gh = fail_create
+        failed = mod.apply_decision(
+            repo="argmend/argmend",
+            prefix="CI red",
+            labels=["nightly-failure"],
+            assignee="SebTardif",
+            run_url="https://example/run/1",
+            decision={
+                "action": "replace",
+                "signature": "test",
+                "first_failed_on": today.isoformat(),
+                "day_count": 1,
+                "run_id": "20",
+            },
+            matches=[{"number": 4}],
+        )
+        self.assertNotEqual(failed, 0)
+        self.assertNotIn(["issue", "close"], [call[1:3] for call in calls])
+
         skipped_green = {"codeql": "success", "dependency-review": "skipped"}
         self.assertEqual(mod.outcome(skipped_green), "green")
         self.assertEqual(
@@ -147,6 +212,15 @@ class ReportScheduledFailureTests(unittest.TestCase):
             "close",
         )
         self.assertEqual(mod.outcome({"codeql": "skipped"}), "noop")
+        self.assertEqual(mod.outcome({"test": "timed_out"}), "red")
+        timed = mod.decide(
+            today=today,
+            results={"test": "timed_out"},
+            issue=None,
+            run_id="18",
+        )
+        self.assertEqual(timed["action"], "create")
+        self.assertEqual(timed["signature"], "test")
         self.assertEqual(
             mod.outcome({"codeql": "failure", "dependency-review": "skipped"}),
             "red",

@@ -24,7 +24,7 @@ def outcome(results: dict[str, str]) -> str:
     vals = {status for status in results.values() if status != "skipped"}
     if not vals:
         return "noop"
-    if "failure" in vals:
+    if "failure" in vals or "timed_out" in vals:
         return "red"
     if "cancelled" in vals:
         return "noop"
@@ -34,7 +34,9 @@ def outcome(results: dict[str, str]) -> str:
 
 
 def failure_signature(results: dict[str, str]) -> str:
-    names = sorted(name for name, status in results.items() if status == "failure")
+    names = sorted(
+        name for name, status in results.items() if status in {"failure", "timed_out"}
+    )
     return ",".join(names)
 
 
@@ -392,27 +394,6 @@ def apply_decision(
         if code != 0:
             return code
 
-    if action == "replace":
-        for item in matches:
-            number = str(item["number"])
-            print(f"DO: close replaced issue {number}")
-            proc = _run_gh(
-                [
-                    "gh",
-                    "issue",
-                    "close",
-                    number,
-                    "--repo",
-                    repo,
-                    "--reason",
-                    "completed",
-                    "--comment",
-                    "Replaced by a new failure issue for this run.",
-                ]
-            )
-            if proc.returncode != 0:
-                return _fail_gh(proc, "issue close")
-
     print(f"DO: create issue {title}")
     cmd = [
         "gh",
@@ -434,6 +415,26 @@ def apply_decision(
         return _fail_gh(proc, "issue create")
     url = (proc.stdout or "").strip()
     print(f"OK: created {url}")
+    if action == "replace":
+        for item in matches:
+            number = str(item["number"])
+            print(f"DO: close replaced issue {number}")
+            closed = _run_gh(
+                [
+                    "gh",
+                    "issue",
+                    "close",
+                    number,
+                    "--repo",
+                    repo,
+                    "--reason",
+                    "completed",
+                    "--comment",
+                    "Replaced by a new failure issue for this run.",
+                ]
+            )
+            if closed.returncode != 0:
+                return _fail_gh(closed, "issue close")
     print(json.dumps({"action": action, "title": title}))
     print("DONE: recorded the scheduled failure")
     return 0
