@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/argmend/argmend/compare/v0.4.2...v0.4.3) (2026-11-22)
+
+
+### Bug Fixes
+
+* keep a caret inside an unquoted Windows path ([#237](https://github.com/argmend/argmend/issues/237)) ([ddea326](https://github.com/argmend/argmend/commit/ddea326e805f885888a07cb0e9a08c14ae935247))
+
 ## [0.4.2](https://github.com/argmend/argmend/compare/v0.4.1...v0.4.2) (2026-11-21)
 
 
