@@ -38,6 +38,7 @@ use super::{RepairError, Rewrite, RewriteKind};
 /// 15. Quote an unquoted drive path or `scheme://` value. A `{` that
 ///     opens inside that path, and the `}` that closes it, stay in the
 ///     path. A comma stays in the name until that name has an extension.
+///     A caret stays in the name.
 ///     A second path after a finished one is quoted too.
 /// 16. Insert a missing colon. A later word in a bare phrase is not a new key.
 ///     An unescaped quote after a finished string value is ambiguous.
@@ -2055,6 +2056,7 @@ fn is_unquoted_path_char(ch: char) -> bool {
                 | '?'
                 | '*'
                 | '['
+                | '^'
         )
 }
 
