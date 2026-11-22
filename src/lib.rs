@@ -199,6 +199,7 @@ pub enum RepairError {
 /// stays there, and a missing comma between two of those paths is inserted.
 /// A comma inside the filename stays when that name has no extension yet.
 /// A semicolon between filename characters stays.
+/// A caret in the filename stays. `{n: 1^2}` stays unfixable.
 /// `//` or `/*` after a port or a path digit stays in that path.
 /// `{n: 12 // note}` is still a comment. `//` and `/*` inside a
 /// `"""` or `'''` triple-quoted string stay. `0x10` and `1_000` inside an
@@ -3835,6 +3836,38 @@ mod tests {
             }
             other => panic!("comma before a number -> {other:?}"),
         }
+    }
+
+    #[test]
+    fn unquoted_path_keeps_a_caret() {
+        match repair_json(r"{path: C:\temp\a^b.txt}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\temp\\a^b.txt");
+            }
+            other => panic!("caret in a path -> {other:?}"),
+        }
+        match repair_json(r"{path: C:\temp\a^b.txt, line: 2}") {
+            RepairOutcome::Repaired { value, .. } => {
+                assert_eq!(value["path"], "C:\\temp\\a^b.txt");
+                assert_eq!(value["line"], 2);
+            }
+            other => panic!("caret path then a key -> {other:?}"),
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": { "path": {"type": "string"} }
+        });
+        let repaired = repair_args(&RepairRequest::new(
+            "read_file",
+            r"{path: C:\temp\a^b.txt}",
+            Some(&schema),
+        ))
+        .expect("schema");
+        assert_eq!(repaired.value["path"], "C:\\temp\\a^b.txt");
+        assert!(matches!(
+            repair_json("{n: 1^2}"),
+            RepairOutcome::Unfixable(_)
+        ));
     }
 
     #[test]
